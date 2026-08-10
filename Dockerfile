@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---------- build: deps + embedding models baked in ----------
-FROM python:3.12-slim AS builder
+FROM python:3.13-slim AS builder
 
 COPY --from=ghcr.io/astral-sh/uv:0.12 /uv /bin/uv
 
@@ -24,7 +24,7 @@ ENV FASTEMBED_CACHE_PATH=/models
 RUN /app/.venv/bin/docs-mcp warmup
 
 # ---------- runtime ----------
-FROM python:3.12-slim
+FROM python:3.13-slim
 
 # onnxruntime needs libgomp; nothing else is required.
 RUN apt-get update \
