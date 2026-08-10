@@ -48,7 +48,10 @@ class AccessControl:
             await self.app(scope, receive, send)
             return
 
-        headers = {key.decode("latin-1").lower(): value.decode("latin-1") for key, value in scope["headers"]}
+        headers = {
+            key.decode("latin-1").lower(): value.decode("latin-1")
+            for key, value in scope["headers"]
+        }
 
         origin = headers.get("origin")
         if origin and not _matches(origin, self.allowed_origins):
@@ -63,16 +66,23 @@ class AccessControl:
         if self.token and scope.get("path") not in _UNPROTECTED_PATHS:
             provided = headers.get("authorization", "")
             scheme, _, value = provided.partition(" ")
-            if scheme.lower() != "bearer" or not hmac.compare_digest(value.strip(), self.token):
+            if scheme.lower() != "bearer" or not hmac.compare_digest(
+                value.strip(), self.token
+            ):
                 await _reject(send, 401, "Unauthorized", {"www-authenticate": "Bearer"})
                 return
 
         await self.app(scope, receive, send)
 
 
-async def _reject(send, status: int, message: str, extra: dict[str, str] | None = None) -> None:
+async def _reject(
+    send, status: int, message: str, extra: dict[str, str] | None = None
+) -> None:
     body = json.dumps({"error": message}).encode()
-    headers = [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())]
+    headers = [
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(body)).encode()),
+    ]
     for key, value in (extra or {}).items():
         headers.append((key.encode("latin-1"), value.encode("latin-1")))
     await send({"type": "http.response.start", "status": status, "headers": headers})

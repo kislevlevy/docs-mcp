@@ -16,8 +16,8 @@ def _serve() -> None:
 
     app = mcp.streamable_http_app(
         streamable_http_path=settings.mcp_path,
-        json_response=True,      # single JSON body per request; no SSE framing needed for search
-        stateless_http=True,     # no session state to keep for a read-only index
+        json_response=True,  # single JSON body per request; no SSE framing needed for search
+        stateless_http=True,  # no session state to keep for a read-only index
         # Origin/Host handling lives in AccessControl so an empty allow-list stays deployable.
         transport_security=None,
     )
@@ -33,7 +33,12 @@ def _serve() -> None:
         f"auth={'bearer' if settings.auth_token else 'none'})",
         flush=True,
     )
-    uvicorn.run(guarded, host=settings.host, port=settings.port, log_level=settings.log_level.lower())
+    uvicorn.run(
+        guarded,
+        host=settings.host,
+        port=settings.port,
+        log_level=settings.log_level.lower(),
+    )
 
 
 def _search(query: str, limit: int, source: str | None) -> None:
@@ -42,7 +47,9 @@ def _search(query: str, limit: int, source: str | None) -> None:
 
     db = store.connect(settings.db_path, read_only=True)
     if not store.schema_ready(db):
-        print(f"no index at {settings.db_path} - build one first:\n  docker compose run --rm indexer")
+        print(
+            f"no index at {settings.db_path} - build one first:\n  docker compose run --rm indexer"
+        )
         return
     hits = store.search(db, query, sources=[source] if source else None, limit=limit)
     if not hits:
@@ -56,17 +63,23 @@ def _search(query: str, limit: int, source: str | None) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="docs-mcp", description="Hybrid documentation search over MCP")
+    parser = argparse.ArgumentParser(
+        prog="docs-mcp", description="Hybrid documentation search over MCP"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("serve", help="run the MCP server (Streamable HTTP)")
 
     index = sub.add_parser("index", help="index new and changed docs")
-    index.add_argument("--force", action="store_true", help="re-embed everything, ignoring hashes")
+    index.add_argument(
+        "--force", action="store_true", help="re-embed everything, ignoring hashes"
+    )
     index.add_argument("--source", help="limit to one source")
     index.add_argument("--quiet", action="store_true")
 
-    sub.add_parser("warmup", help="download and load the models (used at image build time)")
+    sub.add_parser(
+        "warmup", help="download and load the models (used at image build time)"
+    )
 
     search = sub.add_parser("search", help="query the index from the shell")
     search.add_argument("query", nargs="+")

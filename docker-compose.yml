@@ -15,7 +15,7 @@ services:
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${PORT:-8765}:8765"
     volumes:
-      - ./data:/data
+      - index:/data
     restart: unless-stopped
 
   # One-shot CLI: `docker compose run --rm indexer [index|search|warmup] ...`
@@ -26,4 +26,11 @@ services:
     profiles: ["tools"]
     volumes:
       - ./docs:/docs:ro
-      - ./data:/data
+      - index:/data
+
+# The index lives in a named volume, not a bind mount: the container runs as the
+# non-root `app` user (uid 999), and a bind-mounted host directory arrives with the
+# host's ownership, so `/data` would be unwritable on a fresh Linux clone. Docker
+# seeds a new named volume from the image, where /data is already owned by app.
+volumes:
+  index:

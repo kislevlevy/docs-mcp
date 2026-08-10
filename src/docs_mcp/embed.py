@@ -45,7 +45,9 @@ def reranker():
             if _reranker is None:
                 from fastembed.rerank.cross_encoder import TextCrossEncoder
 
-                _reranker = TextCrossEncoder(model_name=settings.rerank_model, **_kwargs())
+                _reranker = TextCrossEncoder(
+                    model_name=settings.rerank_model, **_kwargs()
+                )
     return _reranker
 
 
@@ -58,7 +60,10 @@ def dimension() -> int:
 
 
 def embed_passages(texts: Iterable[str]) -> list[np.ndarray]:
-    return [np.asarray(v, dtype=np.float32) for v in dense_model().embed(list(texts), batch_size=settings.embed_batch)]
+    return [
+        np.asarray(v, dtype=np.float32)
+        for v in dense_model().embed(list(texts), batch_size=settings.embed_batch)
+    ]
 
 
 def embed_query(query: str) -> np.ndarray:

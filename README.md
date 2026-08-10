@@ -57,12 +57,12 @@ With a token: put `AUTH_TOKEN=…` in `.env`, restart, then add
 
 ## Tools the model gets
 
-| tool | does |
-|---|---|
+| tool           | does                                                  |
+| -------------- | ----------------------------------------------------- |
 | `list_sources` | which doc sets exist, file/chunk counts, last indexed |
-| `search_docs` | hybrid search — `query`, optional `sources`, `limit` |
-| `fetch_chunk` | a hit plus its neighbouring passages |
-| `fetch_doc` | a whole page, paginated |
+| `search_docs`  | hybrid search — `query`, optional `sources`, `limit`  |
+| `fetch_chunk`  | a hit plus its neighbouring passages                  |
+| `fetch_doc`    | a whole page, paginated                               |
 
 Also exposed as resources: `docs://<source>/<path>`.
 
@@ -103,14 +103,14 @@ uv run pytest -q          # 40 tests: chunking + retrieval quality gate
 
 Measured on this corpus (1809 files, 4068 chunks, 4 sources):
 
-| | |
-|---|---|
-| full index | ~2 min native, ~8 min under Docker Desktop on macOS |
-| re-index, nothing changed | <1 s |
-| re-index, one file edited | ~1 s |
-| search | ~6 ms median |
-| image | 1.13 GB (both ONNX models baked in) |
-| index file | `data/index.db`, 43 MB |
+|                           |                                                     |
+| ------------------------- | --------------------------------------------------- |
+| full index                | ~2 min native, ~8 min under Docker Desktop on macOS |
+| re-index, nothing changed | <1 s                                                |
+| re-index, one file edited | ~1 s                                                |
+| search                    | ~6 ms median                                        |
+| image                     | 1.13 GB (both ONNX models baked in)                 |
+| index file                | `index.db`, 43 MB, in the `docs-mcp_index` volume   |
 
 ## Notes
 
@@ -120,16 +120,20 @@ Measured on this corpus (1809 files, 4068 chunks, 4 sources):
   search buries them.
 - **`RERANK=0` by default on purpose.** A cross-encoder pass was measured on this corpus and gave
   no improvement on prose queries (fusion already ranks 6 of 7 first) while costing ~740 ms per
-  search instead of 6 ms. It also *hurts* identifier queries — MRR 0.79 vs 0.92 — because
+  search instead of 6 ms. It also _hurts_ identifier queries — MRR 0.79 vs 0.92 — because
   cross-encoders score bare config keys as uniformly irrelevant. Identifier queries bypass it even
   when enabled. Try `RERANK=1` if your corpus is more prose-heavy.
 - **Search returns ranked candidates, not a relevance guarantee.** A vector search always has
   nearest neighbours, and on this corpus the best-match distance for a real paraphrase (0.80)
   overlaps that of an invented word (0.83) — too close to threshold without losing real recall.
   A query with no searchable token at all returns nothing.
-- Back up by copying `data/index.db`; delete it to start over.
-- The server mounts only `data/`. The docs tree goes to the indexer only, and `fetch_doc` serves
-  from the index, so the server has no filesystem path to traverse.
+- The index is a named volume (`docs-mcp_index`), not a bind mount — the container runs as the
+  non-root `app` user (uid 999), and a bind-mounted host directory arrives with the host's
+  ownership, so `/data` is unwritable on a fresh Linux clone. Back up with
+  `docker compose cp server:/data/index.db ./index.db`; restore with the same in reverse.
+  `docker compose down -v` deletes it and starts over.
+- The server mounts only the index volume. The docs tree goes to the indexer only, and `fetch_doc`
+  serves from the index, so the server has no filesystem path to traverse.
 - Embeddings run on CPU in the container (`bge-small-en-v1.5`, 384-dim), models baked into the
   image, `HF_HUB_OFFLINE=1`. No network at runtime.
 - Changing `DENSE_MODEL` forces a full rebuild automatically — vectors from two models aren't

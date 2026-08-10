@@ -45,12 +45,17 @@ def _indexed() -> bool:
 
 # ---------------------------------------------------------------- result models
 
+
 class SourceInfo(BaseModel):
     source: str = Field(description="Identifier to pass to search_docs(sources=[...]).")
     files: int
     chunks: int
-    indexed_at: str | None = Field(default=None, description="UTC timestamp of the last index run.")
-    sample_titles: list[str] = Field(default_factory=list, description="A few document titles, to convey scope.")
+    indexed_at: str | None = Field(
+        default=None, description="UTC timestamp of the last index run."
+    )
+    sample_titles: list[str] = Field(
+        default_factory=list, description="A few document titles, to convey scope."
+    )
 
 
 class SourceList(BaseModel):
@@ -60,10 +65,16 @@ class SourceList(BaseModel):
 
 
 class SearchHit(BaseModel):
-    chunk_id: int = Field(description="Pass to fetch_chunk to widen context around this hit.")
+    chunk_id: int = Field(
+        description="Pass to fetch_chunk to widen context around this hit."
+    )
     source: str
-    path: str = Field(description="Path within the source; pass to fetch_doc for the whole document.")
-    heading_path: str = Field(description="Heading breadcrumb locating this passage in its document.")
+    path: str = Field(
+        description="Path within the source; pass to fetch_doc for the whole document."
+    )
+    heading_path: str = Field(
+        description="Heading breadcrumb locating this passage in its document."
+    )
     score: float
     text: str
 
@@ -92,7 +103,9 @@ class DocResult(BaseModel):
     text: str
     offset: int
     total_chars: int
-    next_offset: int | None = Field(default=None, description="Pass as offset to continue; null when complete.")
+    next_offset: int | None = Field(
+        default=None, description="Pass as offset to continue; null when complete."
+    )
 
 
 # ---------------------------------------------------------------- server
@@ -152,7 +165,10 @@ async def search_docs(
     if not query.strip():
         return SearchResults(query=query, hits=[])
     hits, ready = await anyio.to_thread.run_sync(
-        lambda: (store.search(db(), query, sources=sources or None, limit=limit), _indexed())
+        lambda: (
+            store.search(db(), query, sources=sources or None, limit=limit),
+            _indexed(),
+        )
     )
     if not hits and not ready:
         raise ValueError(EMPTY_INDEX_HINT)
@@ -179,7 +195,9 @@ async def fetch_chunk(chunk_id: int, context: int = 1) -> ChunkResult:
     Cheaper than fetch_doc when a hit is nearly right but cut off mid-explanation.
     """
     context = max(0, min(context, 5))
-    rows = await anyio.to_thread.run_sync(lambda: store.get_chunk(db(), chunk_id, context))
+    rows = await anyio.to_thread.run_sync(
+        lambda: store.get_chunk(db(), chunk_id, context)
+    )
     if not rows:
         raise ValueError(f"No such chunk_id: {chunk_id}")
     return ChunkResult(
@@ -197,7 +215,9 @@ async def fetch_chunk(chunk_id: int, context: int = 1) -> ChunkResult:
 
 
 @mcp.tool()
-async def fetch_doc(source: str, path: str, offset: int = 0, max_chars: int = 40_000) -> DocResult:
+async def fetch_doc(
+    source: str, path: str, offset: int = 0, max_chars: int = 40_000
+) -> DocResult:
     """Read a whole documentation page, using `source` and `path` from a search hit.
 
     Long pages are paginated: when `next_offset` is not null, call again with it
@@ -209,7 +229,9 @@ async def fetch_doc(source: str, path: str, offset: int = 0, max_chars: int = 40
     def load() -> tuple[sqlite3.Row, str]:
         row = store.get_document(db(), source, path)
         if row is None:
-            raise ValueError(f"No such document: {source}/{path} (use search_docs to find valid paths)")
+            raise ValueError(
+                f"No such document: {source}/{path} (use search_docs to find valid paths)"
+            )
         return row, store.document_text(db(), int(row["id"]))
 
     row, text = await anyio.to_thread.run_sync(load)
@@ -229,6 +251,7 @@ async def fetch_doc(source: str, path: str, offset: int = 0, max_chars: int = 40
 @mcp.resource("docs://{source}/{+path}", mime_type="text/markdown")
 async def doc_resource(source: str, path: str) -> str:
     """A documentation page, addressed as docs://<source>/<path>."""
+
     def load() -> str:
         row = store.get_document(db(), source, path)
         if row is None:
@@ -243,4 +266,6 @@ async def health(_request):  # noqa: ANN001 - starlette Request
     from starlette.responses import JSONResponse
 
     ready = await anyio.to_thread.run_sync(_indexed)
-    return JSONResponse({"status": "ok" if ready else "empty-index"}, status_code=200 if ready else 503)
+    return JSONResponse(
+        {"status": "ok" if ready else "empty-index"}, status_code=200 if ready else 503
+    )

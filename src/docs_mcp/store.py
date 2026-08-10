@@ -50,8 +50,7 @@ def connect(db_path: Path, *, read_only: bool = False) -> sqlite3.Connection:
 
 
 def create_schema(db: sqlite3.Connection, dim: int) -> None:
-    db.executescript(
-        """
+    db.executescript("""
         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
         CREATE TABLE IF NOT EXISTS files (
@@ -80,17 +79,14 @@ def create_schema(db: sqlite3.Connection, dim: int) -> None:
             heading_path,
             tokenize='unicode61 remove_diacritics 2'
         );
-        """
-    )
-    db.execute(
-        f"""
+        """)
+    db.execute(f"""
         CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
             chunk_id INTEGER PRIMARY KEY,
             source TEXT PARTITION KEY,
             embedding FLOAT[{dim}]
         )
-        """
-    )
+        """)
     db.execute(
         "INSERT INTO meta(key, value) VALUES('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         (str(SCHEMA_VERSION),),
@@ -133,8 +129,12 @@ def get_meta(db: sqlite3.Connection, key: str) -> str | None:
 
 # ---------------------------------------------------------------- writes
 
+
 def delete_file(db: sqlite3.Connection, file_id: int) -> None:
-    ids = [r["id"] for r in db.execute("SELECT id FROM chunks WHERE file_id = ?", (file_id,))]
+    ids = [
+        r["id"]
+        for r in db.execute("SELECT id FROM chunks WHERE file_id = ?", (file_id,))
+    ]
     if ids:
         marks = ",".join("?" * len(ids))
         db.execute(f"DELETE FROM chunks_fts WHERE chunk_id IN ({marks})", ids)
@@ -154,13 +154,22 @@ def upsert_file(
     chunks: Sequence,
     vectors: Sequence[np.ndarray],
 ) -> int:
-    row = db.execute("SELECT id FROM files WHERE source = ? AND rel_path = ?", (source, rel_path)).fetchone()
+    row = db.execute(
+        "SELECT id FROM files WHERE source = ? AND rel_path = ?", (source, rel_path)
+    ).fetchone()
     if row:
         delete_file(db, row["id"])
 
     cursor = db.execute(
         "INSERT INTO files(source, rel_path, sha256, title, bytes, indexed_at) VALUES(?,?,?,?,?,?)",
-        (source, rel_path, sha256, title, size, datetime.now(UTC).isoformat(timespec="seconds")),
+        (
+            source,
+            rel_path,
+            sha256,
+            title,
+            size,
+            datetime.now(UTC).isoformat(timespec="seconds"),
+        ),
     )
     file_id = int(cursor.lastrowid)
 
@@ -217,11 +226,15 @@ def fts_query(query: str) -> str | None:
     return " OR ".join(f'"{t}"' for t in sorted(tokens))
 
 
-def _lexical(db: sqlite3.Connection, query: str, sources: Sequence[str] | None, k: int) -> list[int]:
+def _lexical(
+    db: sqlite3.Connection, query: str, sources: Sequence[str] | None, k: int
+) -> list[int]:
     return _match(db, fts_query(query), sources, k)
 
 
-def _match(db: sqlite3.Connection, match: str | None, sources: Sequence[str] | None, k: int) -> list[int]:
+def _match(
+    db: sqlite3.Connection, match: str | None, sources: Sequence[str] | None, k: int
+) -> list[int]:
     if match is None:
         return []
     sql = """
@@ -240,7 +253,9 @@ def _match(db: sqlite3.Connection, match: str | None, sources: Sequence[str] | N
     return [int(r["chunk_id"]) for r in db.execute(sql, params)]
 
 
-def _dense(db: sqlite3.Connection, query: str, sources: Sequence[str] | None, k: int) -> list[int]:
+def _dense(
+    db: sqlite3.Connection, query: str, sources: Sequence[str] | None, k: int
+) -> list[int]:
     vector = embed.embed_query(query).tobytes()
     # sqlite-vec constrains a partition key with `=`, so multiple sources are
     # separate KNN passes merged by distance.
@@ -253,7 +268,9 @@ def _dense(db: sqlite3.Connection, query: str, sources: Sequence[str] | None, k:
         else:
             sql = "SELECT chunk_id, distance FROM chunks_vec WHERE embedding MATCH ? AND k = ? AND source = ?"
             params = [vector, k, source]
-        scored += [(float(r["distance"]), int(r["chunk_id"])) for r in db.execute(sql, params)]
+        scored += [
+            (float(r["distance"]), int(r["chunk_id"])) for r in db.execute(sql, params)
+        ]
     scored.sort()
     return [chunk_id for _, chunk_id in scored[:k]]
 
@@ -334,14 +351,21 @@ def search(
 
     pool = fused[: max(settings.rerank_pool, limit)] if use_rerank else fused[:limit]
     rows = _load(db, [chunk_id for chunk_id, _ in pool])
-    candidates = [(chunk_id, score, rows[chunk_id]) for chunk_id, score in pool if chunk_id in rows]
+    candidates = [
+        (chunk_id, score, rows[chunk_id])
+        for chunk_id, score in pool
+        if chunk_id in rows
+    ]
 
     if use_rerank and candidates:
         texts = [
-            f"{r['heading_path']}\n{r['text']}" if r["heading_path"] else r["text"] for _, _, r in candidates
+            f"{r['heading_path']}\n{r['text']}" if r["heading_path"] else r["text"]
+            for _, _, r in candidates
         ]
         scores = embed.rerank(query, texts)
-        by_rerank = sorted(range(len(candidates)), key=lambda i: scores[i], reverse=True)
+        by_rerank = sorted(
+            range(len(candidates)), key=lambda i: scores[i], reverse=True
+        )
 
         # Fuse the reranker's ranking with the retrieval ranking rather than letting
         # it replace it. A cross-encoder given a query full of library-specific
@@ -355,7 +379,9 @@ def search(
         candidates = [
             (chunk_id, score, by_id[chunk_id])
             for chunk_id, score in _rrf(
-                [retrieval_order, rerank_order], settings.rrf_k, [settings.w_retrieval, settings.w_rerank]
+                [retrieval_order, rerank_order],
+                settings.rrf_k,
+                [settings.w_retrieval, settings.w_rerank],
             )
         ]
 
@@ -375,19 +401,18 @@ def search(
 
 # ---------------------------------------------------------------- reads
 
+
 def list_sources(db: sqlite3.Connection) -> list[dict]:
     if not schema_ready(db):
         return []
-    rows = db.execute(
-        """
+    rows = db.execute("""
         SELECT fl.source AS source,
                COUNT(DISTINCT fl.id) AS files,
                COUNT(c.id)           AS chunks,
                MAX(fl.indexed_at)    AS indexed_at
         FROM files fl LEFT JOIN chunks c ON c.file_id = fl.id
         GROUP BY fl.source ORDER BY fl.source
-        """
-    ).fetchall()
+        """).fetchall()
     out = []
     for row in rows:
         titles = [
@@ -410,7 +435,9 @@ def list_sources(db: sqlite3.Connection) -> list[dict]:
     return out
 
 
-def get_chunk(db: sqlite3.Connection, chunk_id: int, context: int = 0) -> list[sqlite3.Row]:
+def get_chunk(
+    db: sqlite3.Connection, chunk_id: int, context: int = 0
+) -> list[sqlite3.Row]:
     if not schema_ready(db):
         return []
     row = db.execute(
@@ -437,9 +464,13 @@ def get_chunk(db: sqlite3.Connection, chunk_id: int, context: int = 0) -> list[s
 def get_document(db: sqlite3.Connection, source: str, path: str) -> sqlite3.Row | None:
     if not schema_ready(db):
         return None
-    return db.execute("SELECT * FROM files WHERE source = ? AND rel_path = ?", (source, path)).fetchone()
+    return db.execute(
+        "SELECT * FROM files WHERE source = ? AND rel_path = ?", (source, path)
+    ).fetchone()
 
 
 def document_text(db: sqlite3.Connection, file_id: int) -> str:
-    rows = db.execute("SELECT text FROM chunks WHERE file_id = ? ORDER BY ord", (file_id,))
+    rows = db.execute(
+        "SELECT text FROM chunks WHERE file_id = ? ORDER BY ord", (file_id,)
+    )
     return "\n\n".join(r["text"] for r in rows)

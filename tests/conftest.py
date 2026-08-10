@@ -48,7 +48,9 @@ def index_db():
     """Build the fixture index once, then hand out a read-only connection."""
     missing = [f for f in FIXTURE_FILES if not (REAL_DOCS / f).is_file()]
     if missing:
-        pytest.skip(f"real docs corpus not available (missing {len(missing)} fixture files)")
+        pytest.skip(
+            f"real docs corpus not available (missing {len(missing)} fixture files)"
+        )
 
     if FIXTURE_ROOT.exists():
         shutil.rmtree(FIXTURE_ROOT)
@@ -62,7 +64,9 @@ def index_db():
     from docs_mcp.indexer import reindex
 
     stats = reindex(quiet=True)
-    assert stats.added == len(FIXTURE_FILES), f"indexed {stats.added} of {len(FIXTURE_FILES)}"
+    assert stats.added == len(
+        FIXTURE_FILES
+    ), f"indexed {stats.added} of {len(FIXTURE_FILES)}"
 
     db = store.connect(settings.db_path, read_only=True)
     yield db

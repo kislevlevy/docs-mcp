@@ -25,11 +25,17 @@ def _csv(name: str) -> list[str]:
 @dataclass(frozen=True)
 class Settings:
     # Paths
-    docs_dir: Path = field(default_factory=lambda: Path(os.environ.get("DOCS_DIR", "/docs")))
-    db_path: Path = field(default_factory=lambda: Path(os.environ.get("DB_PATH", "/data/index.db")))
+    docs_dir: Path = field(
+        default_factory=lambda: Path(os.environ.get("DOCS_DIR", "/docs"))
+    )
+    db_path: Path = field(
+        default_factory=lambda: Path(os.environ.get("DB_PATH", "/data/index.db"))
+    )
 
     # Serving
-    host: str = os.environ.get("HOST", "0.0.0.0")  # noqa: S104 - published address is set by compose
+    host: str = os.environ.get(
+        "HOST", "0.0.0.0"
+    )  # noqa: S104 - published address is set by compose
     port: int = int(os.environ.get("PORT", "8765"))
     mcp_path: str = os.environ.get("MCP_PATH", "/mcp")
     log_level: str = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -48,11 +54,15 @@ class Settings:
     # does help; identifier queries bypass it either way. See tests/test_retrieval.py.
     rerank: bool = field(default_factory=lambda: _flag("RERANK", False))
     embed_batch: int = int(os.environ.get("EMBED_BATCH", "64"))
-    threads: int | None = int(os.environ["THREADS"]) if os.environ.get("THREADS") else None
+    threads: int | None = (
+        int(os.environ["THREADS"]) if os.environ.get("THREADS") else None
+    )
 
     # Retrieval shape
     candidates: int = int(os.environ.get("CANDIDATES", "50"))  # per leg (BM25, dense)
-    rerank_pool: int = int(os.environ.get("RERANK_POOL", "40"))  # fused hits sent to reranker
+    rerank_pool: int = int(
+        os.environ.get("RERANK_POOL", "40")
+    )  # fused hits sent to reranker
     default_limit: int = int(os.environ.get("DEFAULT_LIMIT", "8"))
     rrf_k: int = int(os.environ.get("RRF_K", "60"))
     # Fusion weights. The phrase leg only fires on identifier-shaped queries, where

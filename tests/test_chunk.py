@@ -33,14 +33,18 @@ def test_markdown_headings_build_breadcrumbs():
 def test_small_adjacent_sections_merge_into_one_chunk():
     # Packing deliberately merges tiny sections; the headings stay in the text,
     # and the chunk carries the first section's breadcrumb.
-    _, chunks = split_document("# Guide\n\nintro\n\n## Setup\n\nstep one\n\n### Details\n\nfine print\n", ".md")
+    _, chunks = split_document(
+        "# Guide\n\nintro\n\n## Setup\n\nstep one\n\n### Details\n\nfine print\n", ".md"
+    )
     assert len(chunks) == 1
     assert chunks[0].heading_path == "Guide"
     assert "## Setup" in chunks[0].text and "### Details" in chunks[0].text
 
 
 def test_frontmatter_title_wins_and_is_removed():
-    title, chunks = split_document('---\ntitle: "Real Title"\ntype: page\n---\n\nbody text\n', ".md")
+    title, chunks = split_document(
+        '---\ntitle: "Real Title"\ntype: page\n---\n\nbody text\n', ".md"
+    )
     assert title == "Real Title"
     assert "type: page" not in joined(chunks)
 
@@ -87,7 +91,9 @@ def test_jsx_and_imports_stripped_from_plain_md():
 
 
 def test_html_comments_stripped_across_lines():
-    _, chunks = split_document(f"# T\n\n<!--\nlicense\nblock\n-->\n\n{filler('keep me')}\n", ".md")
+    _, chunks = split_document(
+        f"# T\n\n<!--\nlicense\nblock\n-->\n\n{filler('keep me')}\n", ".md"
+    )
     body = joined(chunks)
     assert "keep me" in body and "license" not in body
 
@@ -111,7 +117,9 @@ def test_rst_toctree_and_labels_dropped():
     _, chunks = split_document(text, ".rst")
     body = joined(chunks)
     assert "real content here" in body
-    assert "toctree" not in body and "maxdepth" not in body and "_some-label" not in body
+    assert (
+        "toctree" not in body and "maxdepth" not in body and "_some-label" not in body
+    )
 
 
 def test_every_chunk_has_a_locator():

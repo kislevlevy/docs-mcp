@@ -15,6 +15,7 @@ from .config import settings
 
 # ---------------------------------------------------------------- data
 
+
 @dataclass(frozen=True, slots=True)
 class Chunk:
     ord: int
@@ -164,7 +165,9 @@ def _markdown_sections(text: str) -> tuple[list[_Section], str | None]:
     def flush() -> None:
         current.body = "\n".join(buf).strip()
         if current.body or current.title:
-            sections.append(_Section(current.level, current.title, list(current.path), current.body))
+            sections.append(
+                _Section(current.level, current.title, list(current.path), current.body)
+            )
         buf.clear()
 
     for line, in_fence in zip(lines, mask, strict=True):
@@ -230,7 +233,9 @@ def _rst_sections(text: str) -> tuple[list[_Section], str | None]:
     def flush() -> None:
         current.body = "\n".join(buf).strip()
         if current.body or current.title:
-            sections.append(_Section(current.level, current.title, list(current.path), current.body))
+            sections.append(
+                _Section(current.level, current.title, list(current.path), current.body)
+            )
         buf.clear()
 
     i = 0
@@ -274,6 +279,7 @@ def _rst_sections(text: str) -> tuple[list[_Section], str | None]:
 
 
 # ---------------------------------------------------------------- packing
+
 
 def _split_oversized(block: str) -> list[str]:
     """Break a too-large block on paragraph boundaries, never inside a fence."""
@@ -334,8 +340,14 @@ def _pack(sections: list[_Section]) -> list[Chunk]:
 
     for section in sections:
         path = _breadcrumb(section.path)
-        heading = f"{'#' * max(section.level, 1)} {section.title}".strip() if section.title else ""
-        block = f"{heading}\n\n{section.body}".strip() if heading else section.body.strip()
+        heading = (
+            f"{'#' * max(section.level, 1)} {section.title}".strip()
+            if section.title
+            else ""
+        )
+        block = (
+            f"{heading}\n\n{section.body}".strip() if heading else section.body.strip()
+        )
         if not block:
             continue
 
@@ -378,11 +390,14 @@ def _absorb_stubs(chunks: list[Chunk]) -> list[Chunk]:
                 text=f"{previous.text}\n\n{chunk.text}",
             )
             continue
-        merged.append(Chunk(ord=len(merged), heading_path=chunk.heading_path, text=chunk.text))
+        merged.append(
+            Chunk(ord=len(merged), heading_path=chunk.heading_path, text=chunk.text)
+        )
     return merged
 
 
 # ---------------------------------------------------------------- entry point
+
 
 def split_document(text: str, suffix: str) -> tuple[str | None, list[Chunk]]:
     """Split `text` into chunks. Returns (document title, chunks)."""
@@ -402,7 +417,8 @@ def split_document(text: str, suffix: str) -> tuple[str | None, list[Chunk]]:
     # Every chunk should carry some locator; fall back to the document title.
     if title:
         chunks = [
-            c if c.heading_path else Chunk(ord=c.ord, heading_path=title, text=c.text) for c in chunks
+            c if c.heading_path else Chunk(ord=c.ord, heading_path=title, text=c.text)
+            for c in chunks
         ]
     return title, chunks
 

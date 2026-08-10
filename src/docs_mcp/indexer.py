@@ -33,7 +33,11 @@ class Stats:
 
 def source_name(directory: Path) -> str:
     name = directory.name
-    return name[: -len("-docs")] if name.endswith("-docs") and len(name) > len("-docs") else name
+    return (
+        name[: -len("-docs")]
+        if name.endswith("-docs") and len(name) > len("-docs")
+        else name
+    )
 
 
 def discover(docs_dir: Path, only: str | None = None) -> dict[str, Path]:
@@ -46,7 +50,9 @@ def discover(docs_dir: Path, only: str | None = None) -> dict[str, Path]:
     }
     if only:
         if only not in sources:
-            raise SystemExit(f"unknown source {only!r}; available: {', '.join(sources) or '(none)'}")
+            raise SystemExit(
+                f"unknown source {only!r}; available: {', '.join(sources) or '(none)'}"
+            )
         return {only: sources[only]}
     return sources
 
@@ -55,7 +61,9 @@ def walk(root: Path) -> list[Path]:
     return sorted(
         p
         for p in root.rglob("*")
-        if p.is_file() and p.suffix.lower() in DOC_EXTENSIONS and not p.name.startswith(".")
+        if p.is_file()
+        and p.suffix.lower() in DOC_EXTENSIONS
+        and not p.name.startswith(".")
     )
 
 
@@ -64,12 +72,18 @@ def _digest(path: Path) -> tuple[str, bytes]:
     return hashlib.sha256(raw).hexdigest(), raw
 
 
-def index_file(db: sqlite3.Connection, source: str, root: Path, path: Path, sha: str, raw: bytes) -> int:
+def index_file(
+    db: sqlite3.Connection, source: str, root: Path, path: Path, sha: str, raw: bytes
+) -> int:
     text = raw.decode("utf-8", errors="replace")
     rel_path = path.relative_to(root).as_posix()
     title, chunks = split_document(text, path.suffix)
     vectors = (
-        embed.embed_passages(embedding_text(source, c.heading_path, c.text) for c in chunks) if chunks else []
+        embed.embed_passages(
+            embedding_text(source, c.heading_path, c.text) for c in chunks
+        )
+        if chunks
+        else []
     )
     store.upsert_file(
         db,
@@ -84,7 +98,9 @@ def index_file(db: sqlite3.Connection, source: str, root: Path, path: Path, sha:
     return len(chunks)
 
 
-def reindex(*, force: bool = False, only: str | None = None, quiet: bool = False) -> Stats:
+def reindex(
+    *, force: bool = False, only: str | None = None, quiet: bool = False
+) -> Stats:
     started = time.monotonic()
     sources = discover(settings.docs_dir, only)
 
@@ -93,7 +109,9 @@ def reindex(*, force: bool = False, only: str | None = None, quiet: bool = False
     stored_dim = store.get_meta(db, "dim")
     if stored_model and stored_model != settings.dense_model:
         # Vectors from a different model are not comparable; rebuild rather than mix.
-        print(f"embedding model changed ({stored_model} -> {settings.dense_model}); forcing full rebuild")
+        print(
+            f"embedding model changed ({stored_model} -> {settings.dense_model}); forcing full rebuild"
+        )
         force = True
         stored_dim = None
     # Only load the model when we actually need its width, so an all-unchanged run
@@ -105,7 +123,9 @@ def reindex(*, force: bool = False, only: str | None = None, quiet: bool = False
     for source, root in sources.items():
         known = {
             row["rel_path"]: row
-            for row in db.execute("SELECT id, rel_path, sha256 FROM files WHERE source = ?", (source,))
+            for row in db.execute(
+                "SELECT id, rel_path, sha256 FROM files WHERE source = ?", (source,)
+            )
         }
         seen: set[str] = set()
 
@@ -139,7 +159,9 @@ def reindex(*, force: bool = False, only: str | None = None, quiet: bool = False
             else:
                 stats.added += 1
             if not quiet and (stats.added + stats.changed) % 100 == 0:
-                print(f"  ... {stats.added + stats.changed} files, {stats.chunks} chunks")
+                print(
+                    f"  ... {stats.added + stats.changed} files, {stats.chunks} chunks"
+                )
 
         for rel_path, row in known.items():
             if rel_path not in seen:
@@ -151,7 +173,9 @@ def reindex(*, force: bool = False, only: str | None = None, quiet: bool = False
     if only is None:
         for row in db.execute("SELECT DISTINCT source FROM files").fetchall():
             if row["source"] not in sources:
-                for stale in db.execute("SELECT id FROM files WHERE source = ?", (row["source"],)).fetchall():
+                for stale in db.execute(
+                    "SELECT id FROM files WHERE source = ?", (row["source"],)
+                ).fetchall():
                     store.delete_file(db, stale["id"])
                     stats.removed += 1
         db.commit()
