@@ -11,6 +11,8 @@ from .config import settings
 def _serve() -> None:
     import uvicorn
 
+    from mcp.server.transport_security import TransportSecuritySettings
+
     from .access import AccessControl
     from .server import mcp
 
@@ -19,7 +21,11 @@ def _serve() -> None:
         json_response=True,  # single JSON body per request; no SSE framing needed for search
         stateless_http=True,  # no session state to keep for a read-only index
         # Origin/Host handling lives in AccessControl so an empty allow-list stays deployable.
-        transport_security=None,
+        # `transport_security=None` is NOT "disabled" - the SDK auto-enables its own
+        # DNS-rebinding Host check (locked to 127.0.0.1/localhost/::1) whenever `host`
+        # isn't passed, which it never is here. Must disable explicitly or every
+        # non-localhost BIND_ADDR gets 421'd before AccessControl ever runs.
+        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
     )
     guarded = AccessControl(
         app,
