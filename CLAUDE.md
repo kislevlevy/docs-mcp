@@ -22,29 +22,30 @@ uv run docs-mcp index --source fastapi
 
 ## Layout
 
-| file | role |
-|---|---|
-| `config.py` | every tunable, all env-driven. `settings` is a frozen module-level singleton |
-| `chunk.py` | splits md/mdx/rst into passages. Pure functions, no I/O |
-| `embed.py` | fastembed wrappers, lazily loaded and cached per process |
-| `store.py` | SQLite schema, writes, and the whole search pipeline |
-| `indexer.py` | walks `docs/`, hash-diffs, calls chunk → embed → store |
-| `server.py` | the 4 MCP tools + `docs://` resource. Thin — logic lives in `store.py` |
-| `access.py` | pure-ASGI Origin/Host/bearer checks |
-| `__main__.py` | CLI: `serve`, `index`, `warmup`, `search` |
+| file          | role                                                                         |
+| ------------- | ---------------------------------------------------------------------------- |
+| `config.py`   | every tunable, all env-driven. `settings` is a frozen module-level singleton |
+| `chunk.py`    | splits md/mdx/rst into passages. Pure functions, no I/O                      |
+| `embed.py`    | fastembed wrappers, lazily loaded and cached per process                     |
+| `store.py`    | SQLite schema, writes, and the whole search pipeline                         |
+| `indexer.py`  | walks `docs/`, hash-diffs, calls chunk → embed → store                       |
+| `server.py`   | the 4 MCP tools + `docs://` resource. Thin — logic lives in `store.py`       |
+| `access.py`   | pure-ASGI Origin/Host/bearer checks                                          |
+| `__main__.py` | CLI: `serve`, `index`, `warmup`, `search`                                    |
 
 Data flows one way: `chunk.py` → `embed.py` → `store.py`. `server.py` only reads.
 
 ## Non-obvious things that will bite you
 
-**`settings` is read at import time.** Tests must set env vars *before* `docs_mcp.config` is
+**`settings` is read at import time.** Tests must set env vars _before_ `docs_mcp.config` is
 imported — that is why `tests/conftest.py` sets them at module top level. `dataclasses.replace`
 will not propagate, because modules bind the singleton by reference.
 
 **The search pipeline is three legs, then a fusion.** Order in `store.search()` matters:
+
 1. phrase leg (identifiers only), 2. BM25 leg, 3. vector leg → weighted RRF → optional rerank.
-Do not "simplify" this to one leg. Each covers a measured failure of the others; `acks_late` and
-`worker_concurrency` return *nothing* without the phrase leg.
+   Do not "simplify" this to one leg. Each covers a measured failure of the others; `acks_late` and
+   `worker_concurrency` return _nothing_ without the phrase leg.
 
 **FTS5 input must be sanitized.** A raw `:`, `-`, `*` or quote in a `MATCH` expression is a syntax
 error, not a no-op. Always build expressions via `fts_query()` / `phrase_query()`.
