@@ -1,0 +1,29 @@
+name: docs-mcp
+
+x-image: &image
+  build: .
+  image: docs-mcp:latest
+  env_file:
+    - path: .env
+      required: false
+
+services:
+  # The MCP endpoint. Reads the index only; the docs tree is not mounted here.
+  server:
+    <<: *image
+    command: ["serve"]
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${PORT:-8765}:8765"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+
+  # One-shot CLI: `docker compose run --rm indexer [index|search|warmup] ...`
+  # Profiled so `docker compose up` never starts it.
+  indexer:
+    <<: *image
+    command: ["index"]
+    profiles: ["tools"]
+    volumes:
+      - ./docs:/docs:ro
+      - ./data:/data

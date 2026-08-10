@@ -1,0 +1,16 @@
+# Mounted at runtime, never baked into the image.
+docs/
+data/
+
+.venv/
+.git/
+.github/
+tests/
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+.ruff_cache/
+.env
+*.db
+*.db-wal
+*.db-shm
