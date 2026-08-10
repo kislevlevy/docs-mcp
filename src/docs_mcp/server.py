@@ -164,14 +164,23 @@ async def search_docs(
     limit = max(1, min(limit, 50))
     if not query.strip():
         return SearchResults(query=query, hits=[])
-    hits, ready = await anyio.to_thread.run_sync(
+
+    hits, ready, available = await anyio.to_thread.run_sync(
         lambda: (
             store.search(db(), query, sources=sources or None, limit=limit),
             _indexed(),
+            store.known_sources(db()),
         )
     )
-    if not hits and not ready:
+    if not ready:
         raise ValueError(EMPTY_INDEX_HINT)
+    # An unknown source name would otherwise return silently empty, leaving the
+    # caller unable to tell "nothing matched" from "I misspelled the source".
+    if unknown := [s for s in (sources or []) if s not in available]:
+        raise ValueError(
+            f"Unknown source(s): {', '.join(sorted(unknown))}. "
+            f"Available: {', '.join(available)}. Call list_sources to see them."
+        )
     return SearchResults(
         query=query,
         hits=[

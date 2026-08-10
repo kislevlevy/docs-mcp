@@ -402,6 +402,13 @@ def search(
 # ---------------------------------------------------------------- reads
 
 
+def known_sources(db: sqlite3.Connection) -> list[str]:
+    """Every indexed source name, for validating a `sources` filter."""
+    if not schema_ready(db):
+        return []
+    return [r["source"] for r in db.execute("SELECT DISTINCT source FROM files ORDER BY source")]
+
+
 def list_sources(db: sqlite3.Connection) -> list[dict]:
     if not schema_ready(db):
         return []
