@@ -26,9 +26,12 @@ RUN /app/.venv/bin/docs-mcp warmup
 # ---------- runtime ----------
 FROM python:3.13-slim
 
-# onnxruntime needs libgomp; nothing else is required.
+# Native rich-document extraction uses Poppler for selective page rendering and
+# Tesseract with only the English/Hebrew language packs. OCR is invoked only for
+# pages whose embedded text layer is missing or unusable.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git libgomp1 \
+    && apt-get install -y --no-install-recommends \
+       git libgomp1 poppler-utils tesseract-ocr tesseract-ocr-eng tesseract-ocr-heb \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -r app && useradd -r -g app -d /app app
 

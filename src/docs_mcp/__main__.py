@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 from .config import settings
@@ -107,6 +108,18 @@ def main(argv: list[str] | None = None) -> int:
     index.add_argument("--source", help="limit to one source")
     index.add_argument("--quiet", action="store_true")
 
+    materialize = sub.add_parser(
+        "materialize", help="materialize local PDF/DOCX files without indexing"
+    )
+    materialize.add_argument("--source", help="limit to one configured source")
+    materialize.add_argument("--force", action="store_true", help="rebuild unchanged rich documents")
+    materialize.add_argument("--strict", action="store_true", help="treat extraction warnings as failures")
+
+    inspect = sub.add_parser("inspect", help="inspect a rich document or generated topic")
+    inspect.add_argument("source")
+    inspect.add_argument("path")
+    inspect.add_argument("--json", action="store_true", dest="as_json")
+
     sub.add_parser(
         "warmup", help="download and load the models (used at image build time)"
     )
@@ -146,6 +159,42 @@ def main(argv: list[str] | None = None) -> int:
             from .embed import warmup
 
             warmup()
+        elif args.command == "materialize":
+            from .materialize import materialize_configured
+
+            results = materialize_configured(
+                source=args.source, force=args.force, strict=args.strict
+            )
+            failed = False
+            for name, result in results.items():
+                stats = result.stats
+                failed = failed or bool(stats.failed)
+                print(
+                    f"{name}: +{stats.added} ~{stats.changed} -{stats.removed} "
+                    f"={stats.unchanged} unchanged; {stats.topics} topics, "
+                    f"{stats.pages} pages, {stats.blocks} blocks, "
+                    f"{stats.ocr_pages} OCR pages, {stats.warnings} warnings, "
+                    f"{stats.elapsed_seconds:.2f}s"
+                    + (f", {stats.failed} failed" if stats.failed else "")
+                )
+                if stats.parser_identities:
+                    print(f"  parsers: {', '.join(stats.parser_identities)}")
+                for error in stats.errors:
+                    print(f"  ! {error}", file=sys.stderr)
+            return 1 if failed else 0
+        elif args.command == "inspect":
+            from .materialize import inspect_materialization
+
+            result = inspect_materialization(args.source, args.path)
+            if args.as_json:
+                print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+            elif "markdown" in result:
+                metadata = {key: value for key, value in result.items() if key != "markdown"}
+                print(json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True))
+                print("\n---\n")
+                print(result["markdown"], end="")
+            else:
+                print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         elif args.command == "search":
             _search(" ".join(args.query), args.limit, args.source)
         return 0

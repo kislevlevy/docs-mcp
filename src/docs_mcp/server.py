@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import json
 
 import anyio.to_thread
 from mcp.server import MCPServer
@@ -89,6 +90,14 @@ class SearchHit(BaseModel):
     )
     score: float
     text: str
+    origin_path: str | None = None
+    origin_media_type: str | None = None
+    section_id: str | None = None
+    page_start: int | None = None
+    page_end: int | None = None
+    page_labels: list[str] = Field(default_factory=list)
+    content_kinds: list[str] = Field(default_factory=list)
+    extraction_methods: list[str] = Field(default_factory=list)
 
 
 class SearchResults(BaseModel):
@@ -102,6 +111,14 @@ class ChunkPassage(BaseModel):
     path: str
     heading_path: str
     text: str
+    origin_path: str | None = None
+    origin_media_type: str | None = None
+    section_id: str | None = None
+    page_start: int | None = None
+    page_end: int | None = None
+    page_labels: list[str] = Field(default_factory=list)
+    content_kinds: list[str] = Field(default_factory=list)
+    extraction_methods: list[str] = Field(default_factory=list)
 
 
 class ChunkResult(BaseModel):
@@ -115,6 +132,14 @@ class DocResult(BaseModel):
     text: str
     offset: int
     total_chars: int
+    origin_path: str | None = None
+    origin_media_type: str | None = None
+    section_id: str | None = None
+    page_start: int | None = None
+    page_end: int | None = None
+    page_labels: list[str] = Field(default_factory=list)
+    extraction_methods: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
     next_offset: int | None = Field(
         default=None, description="Pass as offset to continue; null when complete."
     )
@@ -200,6 +225,14 @@ async def search_docs(
                 heading_path=h.heading_path,
                 score=h.score,
                 text=h.text,
+                origin_path=h.origin_path,
+                origin_media_type=h.origin_media_type,
+                section_id=h.section_id,
+                page_start=h.page_start,
+                page_end=h.page_end,
+                page_labels=list(h.page_labels),
+                content_kinds=list(h.content_kinds),
+                extraction_methods=list(h.extraction_methods),
             )
             for h in hits
         ],
@@ -226,6 +259,14 @@ async def fetch_chunk(source: str, chunk_id: int, context: int = 1) -> ChunkResu
                 path=r["rel_path"],
                 heading_path=r["heading_path"],
                 text=r["text"],
+                origin_path=r["origin_path"],
+                origin_media_type=r["origin_media_type"],
+                section_id=r["section_id"],
+                page_start=r["page_start"],
+                page_end=r["page_end"],
+                page_labels=json.loads(r["page_labels_json"]),
+                content_kinds=json.loads(r["content_kinds_json"]),
+                extraction_methods=json.loads(r["extraction_methods_json"]),
             )
             for r in rows
         ]
@@ -262,6 +303,14 @@ async def fetch_doc(
         text=window,
         offset=offset,
         total_chars=len(text),
+        origin_path=row["origin_path"],
+        origin_media_type=row["origin_media_type"],
+        section_id=row["section_id"],
+        page_start=row["page_start"],
+        page_end=row["page_end"],
+        page_labels=json.loads(row["page_labels_json"]),
+        extraction_methods=json.loads(row["extraction_methods_json"]),
+        warnings=json.loads(row["warnings_json"]),
         next_offset=end if end < len(text) else None,
     )
 

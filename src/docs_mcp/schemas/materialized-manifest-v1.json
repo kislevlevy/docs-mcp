@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://docs-mcp.local/schemas/materialized-manifest-v1.json",
+  "title": "docs-mcp materialized rich document manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifest_version",
+    "source",
+    "origin_path",
+    "origin_media_type",
+    "origin_sha256",
+    "parser",
+    "pipeline_fingerprint",
+    "warnings",
+    "documents"
+  ],
+  "properties": {
+    "manifest_version": {"const": 1},
+    "source": {"type": "string", "minLength": 1, "maxLength": 200},
+    "origin_path": {"type": "string", "minLength": 1},
+    "origin_media_type": {"type": "string", "minLength": 1},
+    "origin_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "page_count": {"type": ["integer", "null"], "minimum": 1},
+    "parser": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1}
+      }
+    },
+    "pipeline_fingerprint": {"type": "string", "minLength": 1},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "ocr_pages": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+    "documents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path", "section_id", "title", "heading_path", "page_start",
+          "page_end", "page_labels", "block_start", "block_end",
+          "section_confidence", "content_kinds", "extraction_methods",
+          "search_aliases", "warnings"
+        ],
+        "properties": {
+          "path": {"type": "string", "pattern": "^[^/]+\\.md$"},
+          "section_id": {"type": "string", "minLength": 1},
+          "title": {"type": "string", "minLength": 1},
+          "heading_path": {"type": "array", "items": {"type": "string"}},
+          "page_start": {"type": ["integer", "null"], "minimum": 1},
+          "page_end": {"type": ["integer", "null"], "minimum": 1},
+          "page_labels": {"type": "array", "items": {"type": "string"}},
+          "block_start": {"$ref": "#/$defs/blockLocation"},
+          "block_end": {"$ref": "#/$defs/blockLocation"},
+          "block_count": {"type": ["integer", "null"], "minimum": 1},
+          "section_confidence": {"type": "number", "minimum": 0, "maximum": 1},
+          "content_kinds": {"type": "array", "items": {"type": "string"}},
+          "extraction_methods": {"type": "array", "items": {"type": "string"}},
+          "search_aliases": {"type": "array", "items": {"type": "string"}},
+          "warnings": {"type": "array", "items": {"type": "string"}},
+          "content_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "blockLocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["page", "document_index", "index"],
+      "properties": {
+        "page": {"type": ["integer", "null"], "minimum": 1},
+        "document_index": {"type": ["integer", "null"], "minimum": 0},
+        "index": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

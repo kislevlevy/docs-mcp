@@ -11,6 +11,8 @@ docker compose run --rm indexer sync                         # reconcile sources
 docker compose run --rm indexer sync --rebuild               # re-embed everything from scratch
 docker compose run --rm indexer sync --source fastapi        # sync one source only
 docker compose run --rm indexer sync --dry-run               # preview changes
+docker compose run --rm indexer materialize --source manuals  # rebuild rich docs without indexing
+docker compose run --rm indexer inspect manuals manual.pdf --json
 docker compose run --rm indexer search --source rabbitmq "per-message ttl" # query from the shell
 docker compose logs -f server                               # follow logs
 docker compose restart server                               # restart
@@ -24,11 +26,27 @@ Copy [sources.toml.example](sources.toml.example) to
 `sources.toml`, edit it, and run `docs-mcp sync` (or `docker compose up -d`). The real
 `sources.toml` is intentionally local-only and is ignored by Git.
 
-Sources are explicitly `git` or `local`; local sources may also contain PDF and DOCX files. Git
-sources index registered text formats only. Unsupported files are skipped, hidden paths and
-symlinks are never followed, and the configured origin is never modified. A failed source retains
-its last usable index while successful sources continue. **No restart is needed** — the running
-server picks up a new index immediately.
+Sources are explicitly `git` or `local`. Markdown, MDX, reStructuredText, and TXT are indexed
+directly. PDF and DOCX are accepted only from local sources and are first converted into one
+inspectable Markdown file per source section under `STATE_DIR/materialized`; the original rich
+document remains the source of truth. Generated paths look like
+`manual.pdf/p0012-b0003-deployment.md` and work with the same search/fetch calls as native docs.
+Git sources ignore repository PDF/DOCX artifacts. Unsupported files are skipped, hidden paths and
+symlinks are never followed, and the configured origin is never modified. A failed rich-document
+update retains its last usable topics while other files continue. **No restart is needed** — the
+running server picks up a new index immediately.
+
+PDF extraction prefers the embedded text layer and invokes local Tesseract `heb+eng` only for a
+page whose native layer is missing or unusable. DOCX extraction walks XML body order so paragraphs
+and tables stay interleaved and never fabricates page numbers. The generated manifest records the
+original hash, parser identity, page/block ranges, methods, and warnings. Page markers are removed
+from searchable prose and exposed as chunk provenance. Encrypted PDFs, macros, external DOCX
+relationships, unsafe ZIP paths, and configured resource-limit violations are rejected.
+
+`docs-mcp materialize [--source NAME] [--force] [--strict]` updates generated output without
+publishing an index. `docs-mcp inspect SOURCE PATH [--json]` accepts either an original PDF/DOCX
+path or a generated logical path and shows its provenance (plus Markdown for a topic). Strict mode
+treats extraction warnings as failures.
 
 With the included Compose configuration, relative local paths should live below `docs/` (for
 example, `path = "docs/logic"`). That directory is mounted into the one-shot indexer read-only and
@@ -86,6 +104,14 @@ THREADS=                # ONNX threads; blank = all cores
 CANDIDATE_MEMORY_MB=64  # candidate data spills to disk above this threshold
 SOURCES_CONFIG=sources.toml
 STATE_DIR=.docs-mcp     # private Git cache and temporary filtered snapshots
+MATERIALIZED_DIR=...    # omit to use STATE_DIR/materialized
+MAX_RICH_BYTES=104857600
+MAX_PDF_PAGES=2000
+MAX_EXTRACTED_CHARS=20000000
+MAX_DOCX_ENTRIES=10000
+MAX_DOCX_EXPANDED_BYTES=524288000
+MAX_RENDERED_PIXELS=50000000
+MAX_RICH_PROCESSING_SECONDS=1800
 ```
 
 ## Verify by hand
@@ -142,6 +168,11 @@ Measured on this corpus (1809 files, 4068 chunks, 4 sources):
   `docker compose down -v` deletes it and starts over.
 - The server mounts only the index volume. The docs tree goes to the indexer only, and `fetch_doc`
   serves from the index, so the server has no filesystem path to traverse.
+- Rich-document output is deterministic for unchanged input and pipeline versions. Successful
+  replacement is atomic and removes stale topics; a failed replacement records an inspectable
+  error and leaves the prior materialization and searchable rows intact. The current PDF backend
+  reconstructs text structure conservatively and does not generate descriptions for unlabeled
+  figures or attempt handwritten recognition.
 - Embeddings run on CPU in the container (`bge-small-en-v1.5`, 384-dim), models baked into the
   image, `HF_HUB_OFFLINE=1`. No network at runtime.
 - Changing `DENSE_MODEL` forces a full rebuild automatically — vectors from two models aren't

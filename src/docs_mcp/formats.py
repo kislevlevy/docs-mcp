@@ -42,3 +42,15 @@ def walk_supported(root: Path, source_type: str) -> tuple[list[Path], int]:
             else:
                 skipped += 1
     return files, skipped
+
+
+def walk_native(root: Path, source_type: str) -> tuple[list[Path], int]:
+    files, skipped = walk_supported(root, source_type)
+    native = [path for path in files if path.suffix.lower() in TEXT_PARSERS]
+    return native, skipped + len(files) - len(native)
+
+
+def walk_rich(root: Path, source_type: str) -> tuple[list[Path], int]:
+    files, skipped = walk_supported(root, source_type)
+    rich = [path for path in files if path.suffix.lower() in RICH_DOCUMENT_PARSERS]
+    return rich, skipped + len(files) - len(rich)

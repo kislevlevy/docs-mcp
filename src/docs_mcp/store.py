@@ -20,9 +20,16 @@ import sqlite_vec
 
 from . import embed
 from .config import DOC_EXTENSIONS, RICH_DOCUMENT_EXTENSIONS, settings
+from .document import (
+    MANIFEST_VERSION,
+    MARKDOWN_RENDERER_VERSION,
+    MATERIALIZATION_FORMAT_VERSION,
+    NORMALIZATION_VERSION,
+    SEGMENTATION_VERSION,
+)
 
-SCHEMA_VERSION = 2
-PIPELINE_VERSION = 1
+SCHEMA_VERSION = 3
+PIPELINE_VERSION = 2
 
 
 def pipeline_fingerprint() -> str:
@@ -35,6 +42,11 @@ def pipeline_fingerprint() -> str:
         "stub_max": settings.stub_max,
         "text_extensions": sorted(DOC_EXTENSIONS),
         "rich_extensions": sorted(RICH_DOCUMENT_EXTENSIONS),
+        "manifest_version": MANIFEST_VERSION,
+        "materialization_format": MATERIALIZATION_FORMAT_VERSION,
+        "normalization_version": NORMALIZATION_VERSION,
+        "segmentation_version": SEGMENTATION_VERSION,
+        "markdown_renderer_version": MARKDOWN_RENDERER_VERSION,
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -50,6 +62,14 @@ class Hit:
     title: str
     text: str
     score: float
+    origin_path: str | None = None
+    origin_media_type: str | None = None
+    section_id: str | None = None
+    page_start: int | None = None
+    page_end: int | None = None
+    page_labels: tuple[str, ...] = ()
+    content_kinds: tuple[str, ...] = ()
+    extraction_methods: tuple[str, ...] = ()
 
 
 def connect(db_path: Path, *, read_only: bool = False) -> sqlite3.Connection:
@@ -119,14 +139,23 @@ def create_schema(db: sqlite3.Connection, dim: int) -> None:
         );
 
         CREATE TABLE IF NOT EXISTS files (
-            id         INTEGER PRIMARY KEY,
-            source     TEXT NOT NULL,
-            source_id  INTEGER NOT NULL REFERENCES sources(id),
-            rel_path   TEXT NOT NULL,
-            sha256     TEXT NOT NULL,
-            title      TEXT,
-            bytes      INTEGER NOT NULL,
-            indexed_at TEXT NOT NULL,
+            id                              INTEGER PRIMARY KEY,
+            source                          TEXT NOT NULL,
+            source_id                       INTEGER NOT NULL REFERENCES sources(id),
+            rel_path                        TEXT NOT NULL,
+            sha256                          TEXT NOT NULL,
+            title                           TEXT,
+            bytes                           INTEGER NOT NULL,
+            indexed_at                      TEXT NOT NULL,
+            origin_path                     TEXT NOT NULL,
+            origin_media_type               TEXT NOT NULL,
+            section_id                      TEXT,
+            page_start                      INTEGER,
+            page_end                        INTEGER,
+            page_labels_json                TEXT NOT NULL DEFAULT '[]',
+            extraction_methods_json         TEXT NOT NULL DEFAULT '[]',
+            warnings_json                   TEXT NOT NULL DEFAULT '[]',
+            materialization_fingerprint     TEXT,
             UNIQUE(source_id, rel_path)
         );
 
@@ -135,7 +164,11 @@ def create_schema(db: sqlite3.Connection, dim: int) -> None:
             file_id      INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
             ord          INTEGER NOT NULL,
             heading_path TEXT NOT NULL DEFAULT '',
-            text         TEXT NOT NULL
+            text         TEXT NOT NULL,
+            page_start   INTEGER,
+            page_end     INTEGER,
+            provenance_json TEXT NOT NULL DEFAULT '[]',
+            content_kinds_json TEXT NOT NULL DEFAULT '[]'
         );
         CREATE INDEX IF NOT EXISTS chunks_file_ord ON chunks(file_id, ord);
 
@@ -371,6 +404,17 @@ def upsert_file(
     size: int,
     chunks: Sequence,
     vectors: Sequence[np.ndarray],
+    origin_path: str | None = None,
+    origin_media_type: str = "text/plain",
+    section_id: str | None = None,
+    page_start: int | None = None,
+    page_end: int | None = None,
+    page_labels: Sequence[str] = (),
+    extraction_methods: Sequence[str] = (),
+    warnings: Sequence[str] = (),
+    materialization_fingerprint: str | None = None,
+    content_kinds: Sequence[str] = (),
+    search_aliases: Sequence[str] = (),
 ) -> int:
     has_source_token = _fts_has_source_token(db)
     if has_source_token:
@@ -389,7 +433,36 @@ def upsert_file(
     if has_source_token and source_id is None:
         raise ValueError("source_id is required by the configured index schema")
     indexed_at = datetime.now(UTC).isoformat(timespec="seconds")
-    if has_source_token:
+    file_columns = {column["name"] for column in db.execute("PRAGMA table_info(files)")}
+    has_provenance = "origin_path" in file_columns
+    if has_source_token and has_provenance:
+        cursor = db.execute(
+            """INSERT INTO files(
+                source, source_id, rel_path, sha256, title, bytes, indexed_at,
+                origin_path, origin_media_type, section_id, page_start, page_end,
+                page_labels_json, extraction_methods_json, warnings_json,
+                materialization_fingerprint
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                source,
+                source_id,
+                rel_path,
+                sha256,
+                title,
+                size,
+                indexed_at,
+                origin_path or rel_path,
+                origin_media_type,
+                section_id,
+                page_start,
+                page_end,
+                json.dumps(list(page_labels), ensure_ascii=False, separators=(",", ":")),
+                json.dumps(list(extraction_methods), ensure_ascii=False, separators=(",", ":")),
+                json.dumps(list(warnings), ensure_ascii=False, separators=(",", ":")),
+                materialization_fingerprint,
+            ),
+        )
+    elif has_source_token:
         cursor = db.execute(
             "INSERT INTO files(source, source_id, rel_path, sha256, title, bytes, indexed_at) "
             "VALUES(?,?,?,?,?,?,?)",
@@ -403,22 +476,46 @@ def upsert_file(
         )
     file_id = int(cursor.lastrowid)
 
+    chunk_columns = {column["name"] for column in db.execute("PRAGMA table_info(chunks)")}
     for chunk, vector in zip(chunks, vectors, strict=True):
-        chunk_id = int(
-            db.execute(
-                "INSERT INTO chunks(file_id, ord, heading_path, text) VALUES(?,?,?,?)",
-                (file_id, chunk.ord, chunk.heading_path, chunk.text),
-            ).lastrowid
-        )
+        if "provenance_json" in chunk_columns:
+            chunk_id = int(
+                db.execute(
+                    """INSERT INTO chunks(
+                        file_id, ord, heading_path, text, page_start, page_end,
+                        provenance_json, content_kinds_json
+                    ) VALUES(?,?,?,?,?,?,?,?)""",
+                    (
+                        file_id,
+                        chunk.ord,
+                        chunk.heading_path,
+                        chunk.text,
+                        getattr(chunk, "page_start", None),
+                        getattr(chunk, "page_end", None),
+                        json.dumps(list(getattr(chunk, "provenance", ())), ensure_ascii=False, separators=(",", ":")),
+                        json.dumps(list(getattr(chunk, "content_kinds", content_kinds)), ensure_ascii=False, separators=(",", ":")),
+                    ),
+                ).lastrowid
+            )
+        else:
+            chunk_id = int(
+                db.execute(
+                    "INSERT INTO chunks(file_id, ord, heading_path, text) VALUES(?,?,?,?)",
+                    (file_id, chunk.ord, chunk.heading_path, chunk.text),
+                ).lastrowid
+            )
+        lexical_text = chunk.text
+        if search_aliases:
+            lexical_text += "\n" + "\n".join(search_aliases)
         if has_source_token:
             db.execute(
                 "INSERT INTO chunks_fts(chunk_id, source_token, text, heading_path) VALUES(?,?,?,?)",
-                (chunk_id, f"s{source_id}", chunk.text, chunk.heading_path),
+                (chunk_id, f"s{source_id}", lexical_text, chunk.heading_path),
             )
         else:
             db.execute(
                 "INSERT INTO chunks_fts(chunk_id, text, heading_path) VALUES(?,?,?)",
-                (chunk_id, chunk.text, chunk.heading_path),
+                (chunk_id, lexical_text, chunk.heading_path),
             )
         db.execute(
             "INSERT INTO chunks_vec(chunk_id, source, embedding) VALUES(?,?,?)",
@@ -550,7 +647,10 @@ def _load(db: sqlite3.Connection, chunk_ids: Sequence[int]) -> dict[int, sqlite3
     marks = ",".join("?" * len(chunk_ids))
     rows = db.execute(
         f"""
-        SELECT c.id, c.heading_path, c.text, fl.source, fl.rel_path, fl.title
+        SELECT c.id, c.heading_path, c.text, c.page_start, c.page_end,
+               c.content_kinds_json, fl.source, fl.rel_path, fl.title,
+               fl.origin_path, fl.origin_media_type, fl.section_id,
+               fl.page_labels_json, fl.extraction_methods_json
         FROM chunks c JOIN files fl ON fl.id = c.file_id
         WHERE c.id IN ({marks})
         """,
@@ -646,6 +746,14 @@ def search(
             title=row["title"] or row["rel_path"],
             text=row["text"],
             score=round(score, 6),
+            origin_path=row["origin_path"],
+            origin_media_type=row["origin_media_type"],
+            section_id=row["section_id"],
+            page_start=row["page_start"],
+            page_end=row["page_end"],
+            page_labels=tuple(json.loads(row["page_labels_json"])),
+            content_kinds=tuple(json.loads(row["content_kinds_json"])),
+            extraction_methods=tuple(json.loads(row["extraction_methods_json"])),
         )
         for chunk_id, score, row in candidates[:limit]
     ]
@@ -741,7 +849,11 @@ def get_chunk(
         return []
     row = db.execute(
         """
-        SELECT c.id, c.ord, c.file_id, c.heading_path, c.text, fl.source, fl.rel_path, fl.title
+        SELECT c.id, c.ord, c.file_id, c.heading_path, c.text,
+               c.page_start, c.page_end, c.provenance_json, c.content_kinds_json,
+               fl.source, fl.rel_path, fl.title, fl.origin_path,
+               fl.origin_media_type, fl.section_id, fl.page_labels_json,
+               fl.extraction_methods_json, fl.warnings_json
         FROM chunks c JOIN files fl ON fl.id = c.file_id
         WHERE fl.source = ? AND c.id = ?
         """,
@@ -753,7 +865,11 @@ def get_chunk(
         return [row]
     return db.execute(
         """
-        SELECT c.id, c.ord, c.file_id, c.heading_path, c.text, fl.source, fl.rel_path, fl.title
+        SELECT c.id, c.ord, c.file_id, c.heading_path, c.text,
+               c.page_start, c.page_end, c.provenance_json, c.content_kinds_json,
+               fl.source, fl.rel_path, fl.title, fl.origin_path,
+               fl.origin_media_type, fl.section_id, fl.page_labels_json,
+               fl.extraction_methods_json, fl.warnings_json
         FROM chunks c JOIN files fl ON fl.id = c.file_id
         WHERE c.file_id = ? AND c.ord BETWEEN ? AND ? ORDER BY c.ord
         """,

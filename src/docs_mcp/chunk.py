@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from dataclasses import replace
 
 from .config import settings
 
@@ -21,6 +22,10 @@ class Chunk:
     ord: int
     heading_path: str
     text: str
+    page_start: int | None = None
+    page_end: int | None = None
+    provenance: tuple[dict, ...] = ()
+    content_kinds: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -427,3 +432,66 @@ def embedding_text(source: str, heading_path: str, text: str) -> str:
     """What actually gets embedded: breadcrumb first, so a lone chunk keeps its context."""
     prefix = f"{source} > {heading_path}" if heading_path else source
     return f"{prefix}\n\n{text}"
+
+
+_SOURCE_PAGE_RE = re.compile(
+    r"<!--\s*docs-mcp-source-page:\s*(\d+)(?:;\s*label:\s*([^>]*?))?\s*-->",
+    re.IGNORECASE,
+)
+_PAGE_TOKEN_RE = re.compile(r"\ue000(\d+):([0-9a-f]*)\ue001")
+
+
+def split_materialized_document(
+    text: str,
+    *,
+    default_page: int | None = None,
+    content_kinds: tuple[str, ...] = (),
+) -> tuple[str | None, list[Chunk]]:
+    """Split generated Markdown while adapting machine page comments to chunks.
+
+    Private-use marker tokens survive Markdown cleaning and packing, then are
+    removed before indexing. The current page carries into later chunks created
+    within the same physical page.
+    """
+
+    def token(match: re.Match[str]) -> str:
+        label = (match.group(2) or "").strip().encode("utf-8").hex()
+        return f"\ue000{int(match.group(1))}:{label}\ue001"
+
+    marked = _SOURCE_PAGE_RE.sub(token, text)
+    title, raw_chunks = split_document(marked, ".md")
+    current_page = default_page
+    chunks: list[Chunk] = []
+    for raw in raw_chunks:
+        matches = list(_PAGE_TOKEN_RE.finditer(raw.text))
+        pages = [int(match.group(1)) for match in matches]
+        labels = [
+            bytes.fromhex(match.group(2)).decode("utf-8") if match.group(2) else None
+            for match in matches
+        ]
+        page_start = current_page
+        if page_start is None and pages:
+            page_start = pages[0]
+        page_end = pages[-1] if pages else page_start
+        if pages:
+            current_page = pages[-1]
+        cleaned = _PAGE_TOKEN_RE.sub("", raw.text)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+        if not cleaned:
+            continue
+        provenance = tuple(
+            {"page": page, **({"label": label} if label else {})}
+            for page, label in zip(pages, labels, strict=True)
+        )
+        chunks.append(
+            replace(
+                raw,
+                ord=len(chunks),
+                text=cleaned,
+                page_start=page_start,
+                page_end=page_end,
+                provenance=provenance,
+                content_kinds=content_kinds,
+            )
+        )
+    return title, chunks

@@ -11,23 +11,22 @@ changed. Editing one file in a 2000-file corpus costs one file's worth of work.
 from __future__ import annotations
 
 import hashlib
-import io
+import json
 import pickle
 import sqlite3
 import tempfile
 import time
-import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
-from xml.etree import ElementTree
-
-from pypdf import PdfReader
 
 from . import embed, store
-from .chunk import embedding_text, split_document
+from .chunk import embedding_text, split_document, split_materialized_document
 from .config import settings
 from .formats import walk_supported
+from .materialize import materialize_source
+from .materialized import IndexDocument, discover_index_documents
 from .sources import SourceSpec
 
 
@@ -40,6 +39,7 @@ class Stats:
     chunks: int = 0
     failed: int = 0
     skipped: int = 0
+    materialization_failed: int = 0
     error: str | None = None
 
 
@@ -108,56 +108,54 @@ def index_file(
         size=len(raw),
         chunks=chunks,
         vectors=vectors,
+        origin_path=rel_path,
+        origin_media_type={
+            ".md": "text/markdown",
+            ".mdx": "text/mdx",
+            ".rst": "text/x-rst",
+            ".txt": "text/plain",
+        }.get(path.suffix.lower(), "text/plain"),
     )
     return len(chunks)
 
 
-def _docx_text(raw: bytes) -> str:
-    try:
-        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
-            xml = archive.read("word/document.xml")
-    except (KeyError, zipfile.BadZipFile) as exc:
-        raise ValueError("invalid DOCX container") from exc
-    root = ElementTree.fromstring(xml)
-    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
-    paragraphs = []
-    for paragraph in root.findall(".//w:p", ns):
-        text = "".join(
-            node.text or "" for node in paragraph.findall(".//w:t", ns)
-        ).strip()
-        if text:
-            paragraphs.append(text)
-    return "\n\n".join(paragraphs)
-
-
-def _pdf_text(raw: bytes) -> str:
-    """Extract text from a native PDF with a real PDF parser."""
-    if not raw.startswith(b"%PDF"):
-        raise ValueError("invalid PDF signature")
-    try:
-        reader = PdfReader(io.BytesIO(raw), strict=False)
-        text = "\n\n".join(page.extract_text() or "" for page in reader.pages)
-    except Exception as exc:
-        raise ValueError("invalid or unreadable PDF") from exc
-    if not text.strip():
-        raise ValueError("PDF contains no extractable text")
-    return text
-
-
-def _parse_bytes(spec: SourceSpec, path: Path, raw: bytes) -> tuple[str | None, list]:
-    suffix = path.suffix.lower()
-    if suffix == ".docx":
-        text = _docx_text(raw)
-        parse_suffix = ".txt"
-    elif suffix == ".pdf":
-        text = _pdf_text(raw)
-        parse_suffix = ".txt"
+def _prepare_document(document: IndexDocument) -> tuple[str, bytes, str | None, list]:
+    raw = document.filesystem_path.read_bytes()
+    if b"\x00" in raw:
+        raise ValueError("binary content in a text document")
+    text = raw.decode("utf-8")
+    if document.section_id is None:
+        title, chunks = split_document(text, document.filesystem_path.suffix)
+        title = title or document.title
     else:
-        if b"\x00" in raw:
-            raise ValueError("binary content in a text document")
-        text = raw.decode("utf-8")
-        parse_suffix = suffix
-    return split_document(text, parse_suffix)
+        kinds = tuple(str(value) for value in document.metadata.get("content_kinds", []))
+        title, chunks = split_materialized_document(
+            text,
+            default_page=document.page_start,
+            content_kinds=kinds,
+        )
+        title = document.title or title
+        manifest_heading = " > ".join(
+            str(value) for value in document.metadata.get("heading_path", [])
+        )
+        if manifest_heading:
+            chunks = [
+                replace(chunk, heading_path=manifest_heading) for chunk in chunks
+            ]
+    searchable_metadata = {
+        "origin_path": document.origin_path,
+        "origin_media_type": document.origin_media_type,
+        "section_id": document.section_id,
+        "page_start": document.page_start,
+        "page_end": document.page_end,
+        "heading_path": document.metadata.get("heading_path", []),
+        "search_aliases": document.metadata.get("search_aliases", []),
+        "materialization_fingerprint": document.metadata.get("materialization_fingerprint"),
+    }
+    digest = hashlib.sha256()
+    digest.update(raw)
+    digest.update(json.dumps(searchable_metadata, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode())
+    return digest.hexdigest(), raw, title, chunks
 
 
 def index_snapshot(
@@ -172,9 +170,22 @@ def index_snapshot(
 ) -> Stats:
     """Prepare all changed files first, then publish one source in one transaction."""
     stats = Stats()
-    paths, stats.skipped = walk_supported(root, spec.type)
+    _, stats.skipped = walk_supported(root, spec.type)
+    if spec.type == "local":
+        materialization = materialize_source(
+            spec.name,
+            root,
+            settings.materialized_dir,
+            force=force,
+        )
+        stats.materialization_failed = materialization.stats.failed
+        if materialization.stats.errors:
+            stats.error = "; ".join(materialization.stats.errors)[:500]
+    documents = discover_index_documents(
+        spec.name, root, settings.materialized_dir
+    )
     if progress:
-        progress(10, f"indexing 0/{len(paths)} files")
+        progress(10, f"indexing 0/{len(documents)} documents")
     known = {
         row["rel_path"]: row
         for row in db.execute(
@@ -186,20 +197,19 @@ def index_snapshot(
         max_size=max(1, settings.candidate_memory_mb) * 1024 * 1024
     )
     try:
-        for position, path in enumerate(paths, 1):
-            rel_path = path.relative_to(root).as_posix()
+        for position, document in enumerate(documents, 1):
+            rel_path = document.logical_path
             seen.add(rel_path)
-            sha, raw = _digest(path)
+            sha, raw, title, chunks = _prepare_document(document)
             previous = known.get(rel_path)
             if previous and previous["sha256"] == sha and not force:
                 stats.unchanged += 1
                 if progress:
                     progress(
-                        10 + int(position / max(1, len(paths)) * 85),
-                        f"indexing {position}/{len(paths)} files",
+                        10 + int(position / max(1, len(documents)) * 85),
+                        f"indexing {position}/{len(documents)} documents",
                     )
                 continue
-            title, chunks = _parse_bytes(spec, path, raw)
             vectors = (
                 embed.embed_passages(
                     embedding_text(spec.name, c.heading_path, c.text) for c in chunks
@@ -208,20 +218,20 @@ def index_snapshot(
                 else []
             )
             pickle.dump(
-                (rel_path, sha, title, len(raw), chunks, vectors),
+                (document, sha, title, len(raw), chunks, vectors),
                 candidates,
                 protocol=pickle.HIGHEST_PROTOCOL,
             )
             if progress:
                 progress(
-                    10 + int(position / max(1, len(paths)) * 85),
-                    f"indexing {position}/{len(paths)} files",
+                    10 + int(position / max(1, len(documents)) * 85),
+                    f"indexing {position}/{len(documents)} documents",
                 )
     except Exception as exc:
         db.rollback()
         stats.failed = 1
         stats.error = (
-            f"{path.relative_to(root).as_posix()}: {type(exc).__name__}: {exc}"
+            f"{rel_path}: {type(exc).__name__}: {exc}"
         )
         if progress:
             progress(100, "failed")
@@ -234,9 +244,10 @@ def index_snapshot(
         candidates.seek(0)
         while True:
             try:
-                rel_path, sha, title, size, chunks, vectors = pickle.load(candidates)
+                document, sha, title, size, chunks, vectors = pickle.load(candidates)
             except EOFError:
                 break
+            rel_path = document.logical_path
             previous = known.get(rel_path)
             store.upsert_file(
                 db,
@@ -248,6 +259,17 @@ def index_snapshot(
                 size=size,
                 chunks=chunks,
                 vectors=vectors,
+                origin_path=document.origin_path,
+                origin_media_type=document.origin_media_type,
+                section_id=document.section_id,
+                page_start=document.page_start,
+                page_end=document.page_end,
+                page_labels=document.metadata.get("page_labels", []),
+                extraction_methods=document.metadata.get("extraction_methods", []),
+                warnings=document.metadata.get("warnings", []),
+                materialization_fingerprint=document.metadata.get("materialization_fingerprint"),
+                content_kinds=document.metadata.get("content_kinds", []),
+                search_aliases=document.metadata.get("search_aliases", []),
             )
             stats.changed += int(previous is not None)
             stats.added += int(previous is None)

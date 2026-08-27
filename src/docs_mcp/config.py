@@ -43,6 +43,27 @@ class Settings:
     state_dir: Path = field(
         default_factory=lambda: Path(os.environ.get("STATE_DIR", ".docs-mcp"))
     )
+    materialized_dir: Path = field(
+        default_factory=lambda: Path(
+            os.environ.get(
+                "MATERIALIZED_DIR",
+                str(Path(os.environ.get("STATE_DIR", ".docs-mcp")) / "materialized"),
+            )
+        )
+    )
+
+    # Rich-document resource limits. Parsers enforce these before publication.
+    max_rich_bytes: int = int(os.environ.get("MAX_RICH_BYTES", str(100 * 1024 * 1024)))
+    max_pdf_pages: int = int(os.environ.get("MAX_PDF_PAGES", "2000"))
+    max_extracted_chars: int = int(os.environ.get("MAX_EXTRACTED_CHARS", "20000000"))
+    max_docx_entries: int = int(os.environ.get("MAX_DOCX_ENTRIES", "10000"))
+    max_docx_expanded_bytes: int = int(
+        os.environ.get("MAX_DOCX_EXPANDED_BYTES", str(500 * 1024 * 1024))
+    )
+    max_rendered_pixels: int = int(os.environ.get("MAX_RENDERED_PIXELS", "50000000"))
+    max_rich_processing_seconds: int = int(
+        os.environ.get("MAX_RICH_PROCESSING_SECONDS", "1800")
+    )
 
     # Serving
     host: str = os.environ.get(
@@ -95,6 +116,11 @@ class Settings:
     # with nothing retrievable in it. Measured against the corpus: everything below
     # 40 chars is a stub, while the 40-160 band is real short content worth keeping.
     stub_max: int = int(os.environ.get("STUB_MAX", "40"))
+
+    @property
+    def materialized_root(self) -> Path:
+        """Compatibility name for callers that describe this path as a root."""
+        return self.materialized_dir
 
 
 settings = Settings()

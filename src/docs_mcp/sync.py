@@ -43,6 +43,7 @@ class SyncResult:
 def _boundary_check(config: SourceConfig, state_dir: Path) -> None:
     state = state_dir.expanduser().resolve()
     database = settings.db_path.expanduser().resolve()
+    materialized = getattr(settings, "materialized_dir", state / "materialized").expanduser().resolve()
     for spec in config.sources:
         if spec.type != "local":
             continue
@@ -60,6 +61,20 @@ def _boundary_check(config: SourceConfig, state_dir: Path) -> None:
         if inside or contains:
             raise ValueError(
                 f"STATE_DIR must not contain or be contained by local source '{spec.name}'"
+            )
+        try:
+            materialized.relative_to(origin)
+            materialized_inside = True
+        except ValueError:
+            materialized_inside = False
+        try:
+            origin.relative_to(materialized)
+            materialized_contains = True
+        except ValueError:
+            materialized_contains = False
+        if materialized_inside or materialized_contains:
+            raise ValueError(
+                f"MATERIALIZED_DIR must not contain or be contained by local source '{spec.name}'"
             )
         try:
             database.relative_to(origin)
@@ -183,7 +198,11 @@ def _ensure_source(db, spec: SourceSpec) -> int:
 def _remove_source_state(state_dir: Path, name: str) -> None:
     """Remove only this source's managed cache and staging directories."""
     root = state_dir.resolve()
-    managed = [state_dir / "staging" / name, state_dir / "git-cache" / name]
+    managed = [
+        state_dir / "staging" / name,
+        state_dir / "git-cache" / name,
+        settings.materialized_dir / name,
+    ]
     managed.extend((state_dir / "tmp").glob(f"{name}-*"))
     for raw_path in managed:
         path = raw_path.resolve()
@@ -210,8 +229,11 @@ def _cleanup_managed_state(state_dir: Path, wanted: set[str]) -> None:
         elif path.exists() or path.is_symlink():
             path.unlink()
 
-    for folder_name in ("git-cache", "staging"):
-        folder = state_dir / folder_name
+    for folder_name, folder in (
+        ("git-cache", state_dir / "git-cache"),
+        ("staging", state_dir / "staging"),
+        ("materialized", settings.materialized_dir),
+    ):
         if not folder.is_dir():
             continue
         for entry in folder.iterdir():
@@ -372,13 +394,16 @@ def _run_incremental(
             )
             continue
         files, chunks = _counts(db, spec.name)
+        materialization_failed = stats.materialization_failed > 0
         store.mark_source_attempt(
             db,
             spec.name,
-            status="success",
+            status="failed" if materialization_failed else "success",
             index_status="ready",
             config_hash=source_hash(spec),
             revision=snapshot.revision,
+            error_code="materialization_failed" if materialization_failed else None,
+            error_message=stats.error if materialization_failed else None,
         )
         db.execute(
             "UPDATE sources SET indexed_files=?, indexed_chunks=? WHERE name=?",
@@ -395,15 +420,19 @@ def _run_incremental(
         revision = f" to commit {snapshot.revision[:8]}" if snapshot.revision else ""
         skipped = snapshot.skipped + stats.skipped
         suffix = f", {skipped} skipped" if skipped else ""
+        result_message = f"{action}{revision}{suffix}"
+        if materialization_failed:
+            result_message += f"; {stats.materialization_failed} rich document(s) failed; last-known-good retained"
         results.append(
             SourceResult(
                 spec.name,
-                "success",
+                "failed" if materialization_failed else "success",
                 "ready",
-                f"{action}{revision}{suffix}",
+                result_message,
                 files,
                 chunks,
                 skipped,
+                stats.error if materialization_failed else None,
             )
         )
         _remove_snapshot(state_dir, snapshot)
@@ -473,9 +502,9 @@ def _run_rebuild(config: SourceConfig, *, quiet: bool) -> SyncResult:
                 quiet=quiet,
                 progress=progress,
             )
-            if stats.failed:
+            if stats.failed or stats.materialization_failed:
                 published = False
-                message = stats.error or "index candidate rejected"
+                message = stats.error or "rich-document materialization failed"
                 index_status = previous_status.get(spec.name, "absent")
                 results.append(
                     SourceResult(
