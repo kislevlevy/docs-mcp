@@ -1,5 +1,7 @@
 .env
 data/
+.docs-mcp/
+sources.toml
 .venv/
 __pycache__/
 *.pyc

@@ -1,0 +1,42 @@
+# Copy this file to sources.toml and replace the example values.
+# sources.toml is local-only and must not be committed.
+version = 1
+
+[[source]]
+name = "celery"
+type = "git"
+url = "https://github.com/celery/celery.git"
+ref = "main"
+directory = "docs"
+description = "Celery documentation"
+
+[[source]]
+name = "rabbitmq"
+type = "git"
+url = "https://github.com/rabbitmq/rabbitmq-website.git"
+ref = "main"
+directory = "docs"
+description = "RabbitMQ documentation"
+
+[[source]]
+name = "velociraptor"
+type = "git"
+url = "https://github.com/Velocidex/velociraptor-docs.git"
+ref = "master"
+directory = "content"
+description = "Velociraptor documentation"
+
+[[source]]
+name = "fastapi"
+type = "git"
+url = "https://github.com/fastapi/fastapi.git"
+ref = "master"
+directory = "docs/en/docs"
+description = "FastAPI documentation"
+
+# Local sources may be added like this:
+# [[source]]
+# name = "company-handbook"
+# type = "local"
+# path = "/absolute/path/to/company-handbook"
+# description = "Internal company documentation"

@@ -1,6 +1,8 @@
 # Mounted at runtime, never baked into the image.
 docs/
 data/
+.docs-mcp/
+sources.toml
 
 .venv/
 .git/

@@ -10,7 +10,6 @@ from __future__ import annotations
 import pytest
 
 from docs_mcp import embed, store
-from docs_mcp.config import settings
 
 # (query, expected document, why it is here)
 GOLDEN = [
@@ -151,6 +150,10 @@ def test_fts_query_survives_punctuation():
     assert store.fts_query("!!!") is None
 
 
+def test_fts_query_keeps_hebrew_tokens():
+    assert store.fts_query("מהי טאוטולוגיה?") == '"טאוטולוגיה" OR "מהי"'
+
+
 def test_punctuation_heavy_query_does_not_raise(index_db):
     hits = store.search(index_db, "what does x-death: do (exactly)?", limit=3)
     assert isinstance(hits, list)
@@ -165,7 +168,7 @@ def test_hits_carry_everything_needed_to_fetch_more(index_db):
     for hit in hits:
         assert hit.chunk_id > 0
         assert hit.source and hit.path and hit.text
-        assert store.get_chunk(index_db, hit.chunk_id, context=1)
+        assert store.get_chunk(index_db, hit.source, hit.chunk_id, context=1)
         assert store.get_document(index_db, hit.source, hit.path) is not None
 
 

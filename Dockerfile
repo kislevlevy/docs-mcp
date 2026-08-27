@@ -28,7 +28,7 @@ FROM python:3.13-slim
 
 # onnxruntime needs libgomp; nothing else is required.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgomp1 \
+    && apt-get install -y --no-install-recommends git libgomp1 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -r app && useradd -r -g app -d /app app
 

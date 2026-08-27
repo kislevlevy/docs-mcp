@@ -6,6 +6,8 @@ serving reads.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import sqlite3
 from collections.abc import Sequence
@@ -17,9 +19,26 @@ import numpy as np
 import sqlite_vec
 
 from . import embed
-from .config import settings
+from .config import DOC_EXTENSIONS, RICH_DOCUMENT_EXTENSIONS, settings
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+PIPELINE_VERSION = 1
+
+
+def pipeline_fingerprint() -> str:
+    payload = {
+        "version": PIPELINE_VERSION,
+        "dense_model": settings.dense_model,
+        "chunk_target": settings.chunk_target,
+        "chunk_max": settings.chunk_max,
+        "chunk_min": settings.chunk_min,
+        "stub_max": settings.stub_max,
+        "text_extensions": sorted(DOC_EXTENSIONS),
+        "rich_extensions": sorted(RICH_DOCUMENT_EXTENSIONS),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,34 +53,81 @@ class Hit:
 
 
 def connect(db_path: Path, *, read_only: bool = False) -> sqlite3.Connection:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(db_path, timeout=30.0, check_same_thread=False)
+    if not read_only:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+    missing_read_only = read_only and not db_path.exists()
+    if missing_read_only:
+        # Let a freshly deployed server report an empty index. Its connection is
+        # replaced when the atomically published database file appears.
+        db = sqlite3.connect(":memory:", timeout=30.0, check_same_thread=False)
+    elif read_only:
+        db = sqlite3.connect(
+            f"file:{db_path.resolve()}?mode=ro",
+            uri=True,
+            timeout=30.0,
+            check_same_thread=False,
+        )
+    else:
+        db = sqlite3.connect(db_path, timeout=30.0, check_same_thread=False)
     db.row_factory = sqlite3.Row
+    db.execute("PRAGMA foreign_keys=ON")
     db.enable_load_extension(True)
     sqlite_vec.load(db)
     db.enable_load_extension(False)
-    db.execute("PRAGMA journal_mode=WAL")
+    if not read_only:
+        db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA busy_timeout=10000")
     db.execute("PRAGMA synchronous=NORMAL")
-    if read_only:
+    if read_only and not missing_read_only:
         # Read-only without the read-only-WAL file-permission trap.
         db.execute("PRAGMA query_only=ON")
     return db
 
 
 def create_schema(db: sqlite3.Connection, dim: int) -> None:
+    existing_version = get_meta(db, "schema_version")
+    if existing_version is not None and existing_version != str(SCHEMA_VERSION):
+        raise RuntimeError(
+            f"index schema {existing_version} cannot be updated in place; "
+            "run 'docs-mcp sync --rebuild'"
+        )
     db.executescript("""
         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+
+        CREATE TABLE IF NOT EXISTS sources (
+            id                   INTEGER PRIMARY KEY,
+            name                 TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            type                 TEXT NOT NULL CHECK(type IN ('git', 'local')),
+            origin               TEXT NOT NULL,
+            ref                  TEXT,
+            source_directory     TEXT,
+            description          TEXT,
+            desired_config_hash  TEXT NOT NULL DEFAULT '',
+            acquisition_hash     TEXT NOT NULL DEFAULT '',
+            indexed_config_hash  TEXT,
+            sync_status          TEXT NOT NULL DEFAULT 'unknown',
+            index_status         TEXT NOT NULL DEFAULT 'absent',
+            indexed_revision     TEXT,
+            last_attempt_at      TEXT,
+            last_success_at      TEXT,
+            last_error_code      TEXT,
+            last_error_message   TEXT,
+            indexed_files        INTEGER NOT NULL DEFAULT 0,
+            indexed_chunks       INTEGER NOT NULL DEFAULT 0,
+            created_at           TEXT NOT NULL DEFAULT '',
+            updated_at           TEXT NOT NULL DEFAULT ''
+        );
 
         CREATE TABLE IF NOT EXISTS files (
             id         INTEGER PRIMARY KEY,
             source     TEXT NOT NULL,
+            source_id  INTEGER NOT NULL REFERENCES sources(id),
             rel_path   TEXT NOT NULL,
             sha256     TEXT NOT NULL,
             title      TEXT,
             bytes      INTEGER NOT NULL,
             indexed_at TEXT NOT NULL,
-            UNIQUE(source, rel_path)
+            UNIQUE(source_id, rel_path)
         );
 
         CREATE TABLE IF NOT EXISTS chunks (
@@ -75,11 +141,17 @@ def create_schema(db: sqlite3.Connection, dim: int) -> None:
 
         CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
             chunk_id UNINDEXED,
+            source_token,
             text,
             heading_path,
             tokenize='unicode61 remove_diacritics 2'
         );
         """)
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(files)")}
+    if "source_id" not in columns:
+        db.execute(
+            "ALTER TABLE files ADD COLUMN source_id INTEGER REFERENCES sources(id)"
+        )
     db.execute(f"""
         CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
             chunk_id INTEGER PRIMARY KEY,
@@ -92,12 +164,16 @@ def create_schema(db: sqlite3.Connection, dim: int) -> None:
         (str(SCHEMA_VERSION),),
     )
     db.execute(
-        "INSERT INTO meta(key, value) VALUES('dim', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        "INSERT INTO meta(key, value) VALUES('dim', ?) ON CONFLICT(key) DO NOTHING",
         (str(dim),),
     )
     db.execute(
-        "INSERT INTO meta(key, value) VALUES('dense_model', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        "INSERT INTO meta(key, value) VALUES('dense_model', ?) ON CONFLICT(key) DO NOTHING",
         (settings.dense_model,),
+    )
+    db.execute(
+        "INSERT INTO meta(key, value) VALUES('pipeline_fingerprint', ?) ON CONFLICT(key) DO NOTHING",
+        (pipeline_fingerprint(),),
     )
     db.commit()
 
@@ -127,6 +203,147 @@ def get_meta(db: sqlite3.Connection, key: str) -> str | None:
     return row["value"] if row else None
 
 
+def upsert_source(
+    db: sqlite3.Connection,
+    *,
+    name: str,
+    kind: str,
+    origin: str,
+    ref: str | None,
+    directory: str | None,
+    description: str | None,
+    desired_config_hash: str,
+    acquisition_hash: str,
+    sync_status: str = "pending",
+    index_status: str = "absent",
+    indexed_config_hash: str | None = None,
+    indexed_revision: str | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+    indexed_files: int = 0,
+    indexed_chunks: int = 0,
+) -> int:
+    now = datetime.now(UTC).isoformat(timespec="seconds")
+    existing = db.execute(
+        "SELECT id, index_status FROM sources WHERE name = ?", (name,)
+    ).fetchone()
+    if existing:
+        db.execute(
+            """UPDATE sources SET type=?, origin=?, ref=?, source_directory=?, description=?,
+               desired_config_hash=?, acquisition_hash=?, indexed_config_hash=COALESCE(?, indexed_config_hash),
+               sync_status=?, index_status=?, indexed_revision=COALESCE(?, indexed_revision),
+               last_error_code=?, last_error_message=?, indexed_files=?, indexed_chunks=?, updated_at=?
+               WHERE id=?""",
+            (
+                kind,
+                origin,
+                ref,
+                directory,
+                description,
+                desired_config_hash,
+                acquisition_hash,
+                indexed_config_hash,
+                sync_status,
+                index_status,
+                indexed_revision,
+                error_code,
+                error_message,
+                indexed_files,
+                indexed_chunks,
+                now,
+                existing["id"],
+            ),
+        )
+        return int(existing["id"])
+    db.execute(
+        """INSERT INTO sources
+           (name, type, origin, ref, source_directory, description, desired_config_hash,
+            acquisition_hash, indexed_config_hash, sync_status, index_status, indexed_revision,
+            last_attempt_at, last_success_at, last_error_code, last_error_message,
+            indexed_files, indexed_chunks, created_at, updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            name,
+            kind,
+            origin,
+            ref,
+            directory,
+            description,
+            desired_config_hash,
+            acquisition_hash,
+            indexed_config_hash,
+            sync_status,
+            index_status,
+            indexed_revision,
+            now,
+            None,
+            error_code,
+            error_message,
+            indexed_files,
+            indexed_chunks,
+            now,
+            now,
+        ),
+    )
+    return int(
+        db.execute("SELECT id FROM sources WHERE name = ?", (name,)).fetchone()["id"]
+    )
+
+
+def mark_source_attempt(
+    db: sqlite3.Connection,
+    name: str,
+    *,
+    status: str,
+    index_status: str,
+    error_code: str | None = None,
+    error_message: str | None = None,
+    revision: str | None = None,
+    config_hash: str | None = None,
+) -> None:
+    now = datetime.now(UTC).isoformat(timespec="seconds")
+    db.execute(
+        """UPDATE sources SET sync_status=?, index_status=?, last_attempt_at=?,
+           last_success_at=CASE WHEN ? = 'success' THEN ? ELSE last_success_at END,
+           indexed_config_hash=COALESCE(?, indexed_config_hash), indexed_revision=COALESCE(?, indexed_revision),
+           last_error_code=?, last_error_message=?, updated_at=? WHERE name=?""",
+        (
+            status,
+            index_status,
+            now,
+            status,
+            now,
+            config_hash,
+            revision,
+            error_code,
+            error_message,
+            now,
+            name,
+        ),
+    )
+
+
+def source_rows(db: sqlite3.Connection) -> list[sqlite3.Row]:
+    if not _table_exists(db, "sources"):
+        return []
+    return db.execute("SELECT * FROM sources ORDER BY name").fetchall()
+
+
+def delete_source(db: sqlite3.Connection, name: str) -> tuple[int, int]:
+    rows = db.execute("SELECT id FROM files WHERE source = ?", (name,)).fetchall()
+    files = len(rows)
+    chunks = 0
+    for row in rows:
+        chunks += int(
+            db.execute(
+                "SELECT COUNT(*) AS n FROM chunks WHERE file_id = ?", (row["id"],)
+            ).fetchone()["n"]
+        )
+        delete_file(db, int(row["id"]))
+    db.execute("DELETE FROM sources WHERE name = ?", (name,))
+    return files, chunks
+
+
 # ---------------------------------------------------------------- writes
 
 
@@ -147,6 +364,7 @@ def upsert_file(
     db: sqlite3.Connection,
     *,
     source: str,
+    source_id: int | None = None,
     rel_path: str,
     sha256: str,
     title: str | None,
@@ -154,23 +372,35 @@ def upsert_file(
     chunks: Sequence,
     vectors: Sequence[np.ndarray],
 ) -> int:
-    row = db.execute(
-        "SELECT id FROM files WHERE source = ? AND rel_path = ?", (source, rel_path)
-    ).fetchone()
+    has_source_token = _fts_has_source_token(db)
+    if has_source_token:
+        row = db.execute(
+            "SELECT id FROM files WHERE source_id = ? AND rel_path = ?",
+            (source_id, rel_path),
+        ).fetchone()
+    else:
+        row = db.execute(
+            "SELECT id FROM files WHERE source = ? AND rel_path = ?",
+            (source, rel_path),
+        ).fetchone()
     if row:
         delete_file(db, row["id"])
 
-    cursor = db.execute(
-        "INSERT INTO files(source, rel_path, sha256, title, bytes, indexed_at) VALUES(?,?,?,?,?,?)",
-        (
-            source,
-            rel_path,
-            sha256,
-            title,
-            size,
-            datetime.now(UTC).isoformat(timespec="seconds"),
-        ),
-    )
+    if has_source_token and source_id is None:
+        raise ValueError("source_id is required by the configured index schema")
+    indexed_at = datetime.now(UTC).isoformat(timespec="seconds")
+    if has_source_token:
+        cursor = db.execute(
+            "INSERT INTO files(source, source_id, rel_path, sha256, title, bytes, indexed_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (source, source_id, rel_path, sha256, title, size, indexed_at),
+        )
+    else:
+        cursor = db.execute(
+            "INSERT INTO files(source, rel_path, sha256, title, bytes, indexed_at) "
+            "VALUES(?,?,?,?,?,?)",
+            (source, rel_path, sha256, title, size, indexed_at),
+        )
     file_id = int(cursor.lastrowid)
 
     for chunk, vector in zip(chunks, vectors, strict=True):
@@ -180,10 +410,16 @@ def upsert_file(
                 (file_id, chunk.ord, chunk.heading_path, chunk.text),
             ).lastrowid
         )
-        db.execute(
-            "INSERT INTO chunks_fts(chunk_id, text, heading_path) VALUES(?,?,?)",
-            (chunk_id, chunk.text, chunk.heading_path),
-        )
+        if has_source_token:
+            db.execute(
+                "INSERT INTO chunks_fts(chunk_id, source_token, text, heading_path) VALUES(?,?,?,?)",
+                (chunk_id, f"s{source_id}", chunk.text, chunk.heading_path),
+            )
+        else:
+            db.execute(
+                "INSERT INTO chunks_fts(chunk_id, text, heading_path) VALUES(?,?,?)",
+                (chunk_id, chunk.text, chunk.heading_path),
+            )
         db.execute(
             "INSERT INTO chunks_vec(chunk_id, source, embedding) VALUES(?,?,?)",
             (chunk_id, source, vector.astype(np.float32).tobytes()),
@@ -193,7 +429,11 @@ def upsert_file(
 
 # ---------------------------------------------------------------- search
 
-_TOKEN_RE = re.compile(r"[0-9A-Za-z]+")
+# ``\w`` is Unicode-aware in Python, but also includes underscores.  The FTS5
+# ``unicode61`` tokenizer treats underscores as separators, so mirror that shape
+# while accepting Hebrew (and other Unicode letters) instead of silently turning
+# non-ASCII queries into an empty search.
+_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
 # Identifier-shaped words: acks_late, x-death, worker.concurrency, celery:beat
 _IDENT_RE = re.compile(r"[0-9A-Za-z]+(?:[_\-.:][0-9A-Za-z]+)+")
 
@@ -245,10 +485,22 @@ def _match(
         WHERE chunks_fts MATCH ?
     """
     params: list = [match]
+    if sources and _fts_has_source_token(db):
+        rows = db.execute(
+            f"SELECT id FROM sources WHERE name IN ({','.join('?' * len(sources))})",
+            list(sources),
+        ).fetchall()
+        if not rows:
+            return []
+        source_clause = " OR ".join(f'source_token:"s{int(row["id"])}"' for row in rows)
+        params[0] = f"({source_clause}) AND ({match})"
     if sources:
         sql += f" AND fl.source IN ({','.join('?' * len(sources))})"
         params += list(sources)
-    sql += " ORDER BY bm25(chunks_fts, 1.0, 0.6) LIMIT ?"
+    if _fts_has_source_token(db):
+        sql += " ORDER BY bm25(chunks_fts, 0.0, 0.0, 1.0, 0.6) LIMIT ?"
+    else:
+        sql += " ORDER BY bm25(chunks_fts, 1.0, 0.6) LIMIT ?"
     params.append(k)
     return [int(r["chunk_id"]) for r in db.execute(sql, params)]
 
@@ -415,6 +667,43 @@ def known_sources(db: sqlite3.Connection) -> list[str]:
 def list_sources(db: sqlite3.Connection) -> list[dict]:
     if not schema_ready(db):
         return []
+    configured = (
+        db.execute("SELECT COUNT(*) AS n FROM sources").fetchone()["n"]
+        if _table_exists(db, "sources")
+        else 0
+    )
+    if configured:
+        rows = db.execute(
+            """SELECT s.name AS source, s.description, s.sync_status, s.index_status,
+                      COUNT(DISTINCT f.id) AS files,
+                      COUNT(c.id) AS chunks,
+                      COALESCE(s.last_success_at, MAX(f.indexed_at)) AS indexed_at
+               FROM sources s LEFT JOIN files f ON f.source_id=s.id
+               LEFT JOIN chunks c ON c.file_id=f.id GROUP BY s.id ORDER BY s.name"""
+        ).fetchall()
+        out = []
+        for row in rows:
+            titles = [
+                r["title"]
+                for r in db.execute(
+                    "SELECT title FROM files WHERE source_id=(SELECT id FROM sources WHERE name=?) "
+                    "AND title IS NOT NULL ORDER BY LENGTH(rel_path), rel_path LIMIT 12",
+                    (row["source"],),
+                )
+            ]
+            out.append(
+                {
+                    "source": row["source"],
+                    "files": row["files"],
+                    "chunks": row["chunks"],
+                    "indexed_at": row["indexed_at"],
+                    "sample_titles": titles,
+                    "description": row["description"],
+                    "sync_status": row["sync_status"],
+                    "index_status": row["index_status"],
+                }
+            )
+        return out
     rows = db.execute("""
         SELECT fl.source AS source,
                COUNT(DISTINCT fl.id) AS files,
@@ -446,16 +735,17 @@ def list_sources(db: sqlite3.Connection) -> list[dict]:
 
 
 def get_chunk(
-    db: sqlite3.Connection, chunk_id: int, context: int = 0
+    db: sqlite3.Connection, source: str, chunk_id: int, context: int = 0
 ) -> list[sqlite3.Row]:
     if not schema_ready(db):
         return []
     row = db.execute(
         """
         SELECT c.id, c.ord, c.file_id, c.heading_path, c.text, fl.source, fl.rel_path, fl.title
-        FROM chunks c JOIN files fl ON fl.id = c.file_id WHERE c.id = ?
+        FROM chunks c JOIN files fl ON fl.id = c.file_id
+        WHERE fl.source = ? AND c.id = ?
         """,
-        (chunk_id,),
+        (source, chunk_id),
     ).fetchone()
     if row is None:
         return []
@@ -484,3 +774,52 @@ def document_text(db: sqlite3.Connection, file_id: int) -> str:
         "SELECT text FROM chunks WHERE file_id = ? ORDER BY ord", (file_id,)
     )
     return "\n\n".join(r["text"] for r in rows)
+
+
+def _table_exists(db: sqlite3.Connection, name: str) -> bool:
+    return (
+        db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone()
+        is not None
+    )
+
+
+def _fts_has_source_token(db: sqlite3.Connection) -> bool:
+    return any(
+        row["name"] == "source_token"
+        for row in db.execute("PRAGMA table_info(chunks_fts)")
+    )
+
+
+def validate_database(db: sqlite3.Connection) -> None:
+    """Reject a rebuild candidate with corruption or index-table orphans."""
+    if not schema_ready(db) or get_meta(db, "schema_version") != str(SCHEMA_VERSION):
+        raise RuntimeError("rebuilt database schema is incomplete")
+    if get_meta(db, "pipeline_fingerprint") != pipeline_fingerprint():
+        raise RuntimeError("rebuilt database has the wrong pipeline fingerprint")
+    integrity = db.execute("PRAGMA integrity_check").fetchone()[0]
+    if integrity != "ok":
+        raise RuntimeError(f"rebuilt database failed integrity_check: {integrity}")
+    for table in ("chunks_fts", "chunks_vec"):
+        count = db.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE chunk_id NOT IN (SELECT id FROM chunks)"
+        ).fetchone()[0]
+        if count:
+            raise RuntimeError(f"rebuilt database has {count} orphan rows in {table}")
+        indexed = db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        chunks = db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        if indexed != chunks:
+            raise RuntimeError(
+                f"rebuilt database has {indexed} rows in {table} for {chunks} chunks"
+            )
+    mismatched = db.execute("""SELECT COUNT(*) FROM sources s WHERE
+           s.indexed_files != (SELECT COUNT(*) FROM files f WHERE f.source_id=s.id)
+           OR s.indexed_chunks != (
+               SELECT COUNT(*) FROM chunks c JOIN files f ON f.id=c.file_id
+               WHERE f.source_id=s.id
+           )""").fetchone()[0]
+    if mismatched:
+        raise RuntimeError(
+            f"rebuilt database has incorrect counts for {mismatched} sources"
+        )

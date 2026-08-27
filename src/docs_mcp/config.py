@@ -8,6 +8,7 @@ from pathlib import Path
 
 # Extensions we treat as documentation. Anything else in docs/ is ignored.
 DOC_EXTENSIONS = frozenset({".md", ".mdx", ".rst", ".txt"})
+RICH_DOCUMENT_EXTENSIONS = frozenset({".pdf", ".docx"})
 
 
 def _flag(name: str, default: bool) -> bool:
@@ -29,7 +30,18 @@ class Settings:
         default_factory=lambda: Path(os.environ.get("DOCS_DIR", "/docs"))
     )
     db_path: Path = field(
-        default_factory=lambda: Path(os.environ.get("DB_PATH", "/data/index.db"))
+        default_factory=lambda: Path(
+            os.environ.get(
+                "DB_PATH",
+                str(Path(os.environ.get("STATE_DIR", ".docs-mcp")) / "index.db"),
+            )
+        )
+    )
+    sources_config: Path = field(
+        default_factory=lambda: Path(os.environ.get("SOURCES_CONFIG", "sources.toml"))
+    )
+    state_dir: Path = field(
+        default_factory=lambda: Path(os.environ.get("STATE_DIR", ".docs-mcp"))
     )
 
     # Serving
@@ -54,6 +66,7 @@ class Settings:
     # does help; identifier queries bypass it either way. See tests/test_retrieval.py.
     rerank: bool = field(default_factory=lambda: _flag("RERANK", False))
     embed_batch: int = int(os.environ.get("EMBED_BATCH", "64"))
+    candidate_memory_mb: int = int(os.environ.get("CANDIDATE_MEMORY_MB", "64"))
     threads: int | None = (
         int(os.environ["THREADS"]) if os.environ.get("THREADS") else None
     )

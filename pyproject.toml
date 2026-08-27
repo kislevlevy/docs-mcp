@@ -10,6 +10,7 @@ dependencies = [
     "sqlite-vec>=0.1.9",
     "pydantic>=2.11",
     "uvicorn>=0.34",
+    "pypdf>=5,<7",
 ]
 
 [project.scripts]

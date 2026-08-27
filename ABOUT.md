@@ -4,8 +4,8 @@
 
 A self-hosted search engine for documentation, exposed to an AI model over MCP.
 
-You drop documentation folders into `docs/`. The model can then ask _which_ doc sets exist and
-search them — either all at once or narrowed to one library — and get back the exact passages it
+You declare Git repositories or local documentation folders in `sources.toml`. The model can then
+ask _which_ doc sets exist, search exactly one of them, and get back the exact passages it
 needs instead of whole files. Everything runs in one container on your own machine; no API keys,
 no documents leaving the box.
 
@@ -14,9 +14,9 @@ Currently indexed: **celery, rabbitmq, velociraptor, fastapi** — 1809 files, ~
 ## How it works
 
 ```
-docs/<name>-docs/**.md|.rst      you drop folders in here
+sources.toml                     desired Git and local sources
         │
-        │  docs-mcp index        split → embed → store (only new/changed files)
+        │  docs-mcp sync         acquire → split → embed → store (only new/changed files)
         ▼
    index.db  (SQLite: text + BM25 index + vectors)
         │
@@ -25,13 +25,14 @@ docs/<name>-docs/**.md|.rst      you drop folders in here
    MCP endpoint :8765/mcp  ──►  AI model (Claude Code, etc.)
 ```
 
-**Indexing.** Every folder under `docs/` becomes a "source" named after the folder. Files are split
+**Indexing.** Every configured entry has a stable source name. Acquired files are split
 on their heading structure — never mid-code-block — so each passage is a coherent section carrying
 its heading breadcrumb (`Queues > TTL > Per-Message TTL`). Each passage is turned into a 384-number
 vector describing its meaning. Markdown, MDX, reStructuredText and Hugo/Docusaurus markup are all
 handled; navigation cruft and redirect stubs are dropped.
 
-**Updating.** Re-indexing hashes every file and only re-processes what actually changed. Nothing
+**Updating.** `sources.toml` is the desired source registry. `docs-mcp sync` hashes every acquired
+file and only re-processes what actually changed. Nothing
 changed → under a second. One file edited → about a second. A full rebuild of everything → a couple
 of minutes. The running server picks up a new index immediately, no restart.
 
@@ -58,7 +59,7 @@ blurs exact config keys together.
 | Storage    | SQLite — FTS5 for keyword/phrase, `sqlite-vec` for vectors. One file, no database server |
 | Embeddings | `BAAI/bge-small-en-v1.5` via `fastembed` (ONNX on CPU, no PyTorch), baked into the image |
 | Serving    | uvicorn + Starlette, non-root container                                                  |
-| Ship       | Docker Compose — one image, two commands (`serve`, `index`)                              |
+| Ship       | Docker Compose — one image, operational `serve` and `sync` commands                     |
 
 Why SQLite rather than a vector database: at this scale the vector scan is exact and takes
 milliseconds, so an approximate index would only lose accuracy. It also means the whole system is
@@ -69,8 +70,8 @@ one container and one file.
 | tool           | purpose                                         |
 | -------------- | ----------------------------------------------- |
 | `list_sources` | what doc sets exist, sizes, when last indexed   |
-| `search_docs`  | search everything, or just the sources you name |
-| `fetch_chunk`  | a hit plus its neighbouring passages            |
+| `search_docs`  | hybrid search within exactly one named source    |
+| `fetch_chunk`  | a source-scoped hit plus neighbouring passages   |
 | `fetch_doc`    | a whole page, paginated                         |
 
 ## Honest limits

@@ -18,14 +18,20 @@ services:
       - index:/data
     restart: unless-stopped
 
-  # One-shot CLI: `docker compose run --rm indexer [index|search|warmup] ...`
-  # Profiled so `docker compose up` never starts it.
+  # One-shot sync: `docker compose up -d` runs it alongside the server.
+  # It exits after publishing the index; run `docker compose start indexer` to retry.
   indexer:
     <<: *image
-    command: ["index"]
-    profiles: ["tools"]
+    command: ["sync"]
+    environment:
+      SOURCES_CONFIG: /sources.toml
+      STATE_DIR: /state
     volumes:
-      - ./docs:/docs:ro
+      - ./sources.toml:/sources.toml:ro
+      # Relative local source paths such as `docs/logic` resolve from /app.
+      # Origins are read-only; acquisition copies eligible files into /state.
+      - ./docs:/app/docs:ro
+      - ./.docs-mcp:/state
       - index:/data
 
 # The index lives in a named volume, not a bind mount: the container runs as the

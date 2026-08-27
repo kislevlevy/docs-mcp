@@ -6,14 +6,15 @@ Guidance for AI agents working in this repo. Read `ABOUT.md` first for what the 
 
 ```bash
 uv sync                                   # install (Python 3.13+)
-uv run pytest -q                          # 40 tests, ~4s, no Docker needed
-uv run docs-mcp search "per-message ttl"  # query the index from the shell
+uv run pytest -q                          # unit and retrieval quality gates
+uv run docs-mcp search --source rabbitmq "per-message ttl"  # query one source
+uv run docs-mcp sync                       # reconcile sources.toml
 docker compose up -d --build              # start the server on :8765
-docker compose run --rm indexer           # index new/changed docs
-docker compose run --rm indexer index --force --source fastapi
+docker compose run --rm indexer sync      # fetch and index configured sources
+docker compose run --rm indexer sync --rebuild
 ```
 
-Local (non-Docker) runs need paths, since defaults are container paths:
+Local runs default to `sources.toml` plus `.docs-mcp/index.db`; override paths when needed:
 
 ```bash
 export DOCS_DIR=$PWD/docs DB_PATH=/tmp/index.db
@@ -25,13 +26,16 @@ uv run docs-mcp index --source fastapi
 | file          | role                                                                         |
 | ------------- | ---------------------------------------------------------------------------- |
 | `config.py`   | every tunable, all env-driven. `settings` is a frozen module-level singleton |
+| `sources.py`  | typed `sources.toml` loading, validation, and canonical hashes              |
+| `acquire.py`  | origin-safe Git/local snapshots and supported-file filtering                 |
+| `sync.py`     | reconciliation, locking, per-source results, and atomic rebuilds             |
 | `chunk.py`    | splits md/mdx/rst into passages. Pure functions, no I/O                      |
 | `embed.py`    | fastembed wrappers, lazily loaded and cached per process                     |
 | `store.py`    | SQLite schema, writes, and the whole search pipeline                         |
 | `indexer.py`  | walks `docs/`, hash-diffs, calls chunk → embed → store                       |
 | `server.py`   | the 4 MCP tools + `docs://` resource. Thin — logic lives in `store.py`       |
 | `access.py`   | pure-ASGI Origin/Host/bearer checks                                          |
-| `__main__.py` | CLI: `serve`, `index`, `warmup`, `search`                                    |
+| `__main__.py` | CLI: `serve`, `sync`, compatibility `index`, `warmup`, `search`              |
 
 Data flows one way: `chunk.py` → `embed.py` → `store.py`. `server.py` only reads.
 
@@ -81,8 +85,8 @@ service.
 
 ## Conventions
 
-- Sources are discovered by convention: each directory under `docs/` is a source named after the
-  folder, minus a trailing `-docs`. There is no source config file, and that is deliberate.
+- Configured sources live in `sources.toml`; the old direct-child discovery remains only behind the
+  deprecated compatibility `index` command.
 - Reindexing is a **content hash** diff, never mtime. `touch` must cost nothing.
 - Deleting chunks means deleting from all three of `chunks`, `chunks_fts`, `chunks_vec`. Orphans in
   either index table are a bug; `_orphans()` in the tests asserts against them.

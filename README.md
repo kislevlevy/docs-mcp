@@ -7,32 +7,37 @@ one container, no API keys, nothing leaves the machine.
 
 ```bash
 docker compose up -d --build                                # build + start the server on :8765
-docker compose run --rm indexer                             # index new/changed docs (run after adding docs)
-docker compose run --rm indexer index --force               # re-embed everything from scratch
-docker compose run --rm indexer index --source fastapi      # index one source only
-docker compose run --rm indexer search "per-message ttl"    # query from the shell, no client needed
+docker compose run --rm indexer sync                         # reconcile sources.toml
+docker compose run --rm indexer sync --rebuild               # re-embed everything from scratch
+docker compose run --rm indexer sync --source fastapi        # sync one source only
+docker compose run --rm indexer sync --dry-run               # preview changes
+docker compose run --rm indexer search --source rabbitmq "per-message ttl" # query from the shell
 docker compose logs -f server                               # follow logs
 docker compose restart server                               # restart
 docker compose down                                         # stop
 curl localhost:8765/health                                  # {"status":"ok"} | {"status":"empty-index"}
 ```
 
-## Add docs
+## Configure and sync sources
+
+Copy [sources.toml.example](sources.toml.example) to
+`sources.toml`, edit it, and run `docs-mcp sync` (or `docker compose up -d`). The real
+`sources.toml` is intentionally local-only and is ignored by Git.
+
+Sources are explicitly `git` or `local`; local sources may also contain PDF and DOCX files. Git
+sources index registered text formats only. Unsupported files are skipped, hidden paths and
+symlinks are never followed, and the configured origin is never modified. A failed source retains
+its last usable index while successful sources continue. **No restart is needed** — the running
+server picks up a new index immediately.
+
+With the included Compose configuration, relative local paths should live below `docs/` (for
+example, `path = "docs/logic"`). That directory is mounted into the one-shot indexer read-only and
+is never mounted into the server. Native `docs-mcp sync` may use any local path.
+
+Refresh the configured upstream doc sets:
 
 ```bash
-cp -r ~/mydocs docs/mydocs-docs        # any folder under docs/ is a source
-docker compose run --rm indexer        # only new/changed files get embedded
-```
-
-Reads `.md`, `.mdx`, `.rst`, `.txt`. Source name = folder name minus a trailing `-docs`.
-Delete a folder and re-run the indexer to drop it. **No restart needed** — the running server picks up
-a new index immediately.
-
-Refresh the bundled upstream doc sets:
-
-```bash
-python3 docs/get_docs.py               # re-pulls celery, rabbitmq, velociraptor, fastapi from GitHub
-docker compose run --rm indexer        # embeds only what changed
+docker compose run --rm indexer sync   # fetches configured sources and embeds only what changed
 ```
 
 ## Connect a client
@@ -60,8 +65,8 @@ With a token: put `AUTH_TOKEN=…` in `.env`, restart, then add
 | tool           | does                                                  |
 | -------------- | ----------------------------------------------------- |
 | `list_sources` | which doc sets exist, file/chunk counts, last indexed |
-| `search_docs`  | hybrid search — `query`, optional `sources`, `limit`  |
-| `fetch_chunk`  | a hit plus its neighbouring passages                  |
+| `search_docs`  | hybrid search — required singular `source`, `query`, `limit` |
+| `fetch_chunk`  | a source-scoped hit plus its neighbouring passages          |
 | `fetch_doc`    | a whole page, paginated                               |
 
 Also exposed as resources: `docs://<source>/<path>`.
@@ -78,6 +83,9 @@ ALLOWED_ORIGINS=        # browser origins allowed; requests with no Origin alway
 RERANK=0                # 1 = add a cross-encoder rerank pass (see Notes)
 DEFAULT_LIMIT=8         # hits per search
 THREADS=                # ONNX threads; blank = all cores
+CANDIDATE_MEMORY_MB=64  # candidate data spills to disk above this threshold
+SOURCES_CONFIG=sources.toml
+STATE_DIR=.docs-mcp     # private Git cache and temporary filtered snapshots
 ```
 
 ## Verify by hand
@@ -96,7 +104,7 @@ curl -s localhost:8765/mcp \
 One POST, no `initialize` handshake — MCP `2026-07-28` is stateless. Both `_meta` keys are required.
 
 ```bash
-uv run pytest -q          # 40 tests: chunking + retrieval quality gate
+uv run pytest -q          # unit, lifecycle, tool, and retrieval quality gates
 ```
 
 ## Numbers

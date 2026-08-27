@@ -25,15 +25,24 @@ _local = threading.local()
 
 
 def db() -> sqlite3.Connection:
-    """One read-only connection per thread; searches run in a worker thread."""
+    """One read-only connection per thread, reopened after an atomic rebuild."""
     conn = getattr(_local, "conn", None)
-    if conn is None:
+    signature = None
+    try:
+        stat = settings.db_path.stat()
+        signature = (stat.st_dev, stat.st_ino)
+    except OSError:
+        pass
+    if conn is None or getattr(_local, "signature", None) != signature:
+        if conn is not None:
+            conn.close()
         conn = store.connect(settings.db_path, read_only=True)
         _local.conn = conn
+        _local.signature = signature
     return conn
 
 
-EMPTY_INDEX_HINT = "The documentation index is empty. Run the indexer on the server: docker compose run --rm indexer"
+EMPTY_INDEX_HINT = "The documentation index is empty. Run: docs-mcp sync"
 
 
 def _indexed() -> bool:
@@ -47,7 +56,7 @@ def _indexed() -> bool:
 
 
 class SourceInfo(BaseModel):
-    source: str = Field(description="Identifier to pass to search_docs(sources=[...]).")
+    source: str = Field(description="Identifier to pass to search_docs(source=...).")
     files: int
     chunks: int
     indexed_at: str | None = Field(
@@ -56,6 +65,9 @@ class SourceInfo(BaseModel):
     sample_titles: list[str] = Field(
         default_factory=list, description="A few document titles, to convey scope."
     )
+    description: str | None = None
+    sync_status: str | None = None
+    index_status: str | None = None
 
 
 class SourceList(BaseModel):
@@ -116,8 +128,8 @@ mcp = MCPServer(
     version="0.1.0",
     instructions=(
         "Searchable third-party documentation. Call list_sources first to see which libraries are "
-        "available, then search_docs with a natural-language question (optionally narrowed to a "
-        "source). Search is hybrid: exact identifiers like prefetch_count work as well as prose. "
+        "available, then search_docs with one source and a natural-language question. Search is "
+        "hybrid: exact identifiers like prefetch_count work as well as prose. "
         "Use fetch_chunk to widen context around a hit and fetch_doc to read a whole page."
     ),
     # Content changes only when the indexer runs, so let clients cache aggressively.
@@ -151,36 +163,33 @@ async def list_sources() -> SourceList:
 @mcp.tool()
 async def search_docs(
     query: str,
-    sources: list[str] | None = None,
+    source: str,
     limit: int = settings.default_limit,
 ) -> SearchResults:
     """Search the documentation and return the most relevant passages.
 
     Combines keyword and semantic matching, so both natural-language questions
     ("how do I retry a failed task") and exact identifiers ("acks_late",
-    "x-death") work. Narrow with `sources` when you know the library; leave it
-    empty to search everything.
+    "x-death") work. Search is deliberately scoped to exactly one source.
     """
     limit = max(1, min(limit, 50))
-    if not query.strip():
-        return SearchResults(query=query, hits=[])
-
-    hits, ready, available = await anyio.to_thread.run_sync(
-        lambda: (
-            store.search(db(), query, sources=sources or None, limit=limit),
-            _indexed(),
-            store.known_sources(db()),
-        )
+    ready, available = await anyio.to_thread.run_sync(
+        lambda: (_indexed(), store.known_sources(db()))
     )
     if not ready:
         raise ValueError(EMPTY_INDEX_HINT)
     # An unknown source name would otherwise return silently empty, leaving the
     # caller unable to tell "nothing matched" from "I misspelled the source".
-    if unknown := [s for s in (sources or []) if s not in available]:
+    if source not in available:
         raise ValueError(
-            f"Unknown source(s): {', '.join(sorted(unknown))}. "
+            f"Unknown source: {source}. "
             f"Available: {', '.join(available)}. Call list_sources to see them."
         )
+    if not query.strip():
+        return SearchResults(query=query, hits=[])
+    hits = await anyio.to_thread.run_sync(
+        lambda: store.search(db(), query, sources=[source], limit=limit)
+    )
     return SearchResults(
         query=query,
         hits=[
@@ -198,17 +207,17 @@ async def search_docs(
 
 
 @mcp.tool()
-async def fetch_chunk(chunk_id: int, context: int = 1) -> ChunkResult:
+async def fetch_chunk(source: str, chunk_id: int, context: int = 1) -> ChunkResult:
     """Read a passage found by search_docs, plus `context` neighbouring passages.
 
     Cheaper than fetch_doc when a hit is nearly right but cut off mid-explanation.
     """
     context = max(0, min(context, 5))
     rows = await anyio.to_thread.run_sync(
-        lambda: store.get_chunk(db(), chunk_id, context)
+        lambda: store.get_chunk(db(), source, chunk_id, context)
     )
     if not rows:
-        raise ValueError(f"No such chunk_id: {chunk_id}")
+        raise ValueError(f"No such chunk_id in source {source!r}: {chunk_id}")
     return ChunkResult(
         passages=[
             ChunkPassage(

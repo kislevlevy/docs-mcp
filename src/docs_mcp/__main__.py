@@ -1,4 +1,4 @@
-"""CLI: docs-mcp serve | index | warmup | search"""
+"""CLI: docs-mcp serve | sync | index | warmup | search"""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from .config import settings
 
 def _serve() -> None:
     import uvicorn
-
     from mcp.server.transport_security import TransportSecuritySettings
 
     from .access import AccessControl
@@ -25,7 +24,9 @@ def _serve() -> None:
         # DNS-rebinding Host check (locked to 127.0.0.1/localhost/::1) whenever `host`
         # isn't passed, which it never is here. Must disable explicitly or every
         # non-localhost BIND_ADDR gets 421'd before AccessControl ever runs.
-        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+        transport_security=TransportSecuritySettings(
+            enable_dns_rebinding_protection=False
+        ),
     )
     guarded = AccessControl(
         app,
@@ -47,17 +48,26 @@ def _serve() -> None:
     )
 
 
-def _search(query: str, limit: int, source: str | None) -> None:
+def _search(query: str, limit: int, source: str) -> None:
     """Query the index from the command line - the quickest way to sanity-check retrieval."""
     from . import store
 
+    if not settings.db_path.exists():
+        print(f"no index at {settings.db_path} - run: docs-mcp sync")
+        return
     db = store.connect(settings.db_path, read_only=True)
     if not store.schema_ready(db):
         print(
             f"no index at {settings.db_path} - build one first:\n  docker compose run --rm indexer"
         )
         return
-    hits = store.search(db, query, sources=[source] if source else None, limit=limit)
+    available = store.known_sources(db)
+    if source not in available:
+        print(
+            f"unknown source {source!r}; available: {', '.join(available) or '(none)'}"
+        )
+        return
+    hits = store.search(db, query, sources=[source], limit=limit)
     if not hits:
         print("no results")
         return
@@ -76,6 +86,20 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("serve", help="run the MCP server (Streamable HTTP)")
 
+    sync = sub.add_parser("sync", help="reconcile sources.toml and update the index")
+    sync.add_argument("--source", help="limit synchronization to one configured source")
+    sync.add_argument(
+        "--rebuild", action="store_true", help="re-embed all configured sources"
+    )
+    sync.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="show the plan without changing files or the database",
+    )
+    sync.add_argument(
+        "--quiet", action="store_true", help="only print the final report"
+    )
+
     index = sub.add_parser("index", help="index new and changed docs")
     index.add_argument(
         "--force", action="store_true", help="re-embed everything, ignoring hashes"
@@ -90,23 +114,44 @@ def main(argv: list[str] | None = None) -> int:
     search = sub.add_parser("search", help="query the index from the shell")
     search.add_argument("query", nargs="+")
     search.add_argument("-n", "--limit", type=int, default=5)
-    search.add_argument("--source")
+    search.add_argument("--source", required=True)
 
     args = parser.parse_args(argv)
 
-    if args.command == "serve":
-        _serve()
-    elif args.command == "index":
-        from .indexer import reindex
+    try:
+        if args.command == "serve":
+            _serve()
+        elif args.command == "sync":
+            from .sync import format_report
+            from .sync import sync as run_sync
 
-        reindex(force=args.force, only=args.source, quiet=args.quiet)
-    elif args.command == "warmup":
-        from .embed import warmup
+            result = run_sync(
+                source=args.source,
+                rebuild=args.rebuild,
+                dry_run=args.dry_run,
+                quiet=args.quiet,
+            )
+            print(format_report(result))
+            return result.exit_code
+        elif args.command == "index":
+            print(
+                "Warning: 'index' is a compatibility command; use 'docs-mcp sync'.",
+                file=sys.stderr,
+            )
+            from .indexer import reindex
 
-        warmup()
-    elif args.command == "search":
-        _search(" ".join(args.query), args.limit, args.source)
-    return 0
+            stats = reindex(force=args.force, only=args.source, quiet=args.quiet)
+            return 1 if stats.failed else 0
+        elif args.command == "warmup":
+            from .embed import warmup
+
+            warmup()
+        elif args.command == "search":
+            _search(" ".join(args.query), args.limit, args.source)
+        return 0
+    except (ValueError, OSError, RuntimeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
